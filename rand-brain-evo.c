@@ -19,6 +19,7 @@
 #define NUM_INPUTS 9 // red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
 #define MAX_WEIGHTS 10000
 #define MAX_SUMSIS 100
+#define MAX_GENES 10000
 
 #define W_PIN__NUM 6
 #define W_PIN_OUT 0
@@ -82,7 +83,10 @@ struct brain_t {
     int output_conn;
     
     TYPE_VALUE learning_rate;
+    TYPE_VALUE initial_weights[MAX_WEIGHTS];
     TYPE_VALUE weights[MAX_WEIGHTS];
+    
+    // For initial calculations
     TYPE_VALUE weight_state[MAX_WEIGHTS];
     TYPE_VALUE sumsi_state[MAX_SUMSIS];
     TYPE_VALUE input_state[NUM_INPUTS];
@@ -94,10 +98,6 @@ struct brain_t *brain_alloc(void) {
     return brain;
 }
 
-// Return an initial value for a weight
-TYPE_VALUE init_weight() {
-    return getrand() * 2. - 1.;
-}
 
 // Implements the nonlinearity that sumsis use
 TYPE_VALUE nonlinearity(TYPE_VALUE x) {
@@ -109,6 +109,7 @@ TYPE_VALUE nonlinearity(TYPE_VALUE x) {
 void brain_constr_init(struct brain_t *brain) {
     int i, j;
     brain->weight_stack = 1; // start with 1 so 0 can mean unconnected
+    brain->initial_weights[1] = .5;
     brain->weight_stack_max = 1;
     brain->sumsi_stack = 1; // start with 1 so 0 can mean unconnected
     brain->sumsi_stack_max = 1;
@@ -124,8 +125,9 @@ void brain_constr_process_command(struct brain_t *brain, int command, int ix) {
     int p;
 
     switch(command) {
-        case CMD_NEW_WEIGHT: // create new weight unit and push
+        case CMD_NEW_WEIGHT: // create new weight unit and push. ix is the initial weight (ix/100)
             brain->weight_stack++;
+            brain->initial_weights[brain->weight_stack] = ((TYPE_VALUE)ix) / 100;
             if(brain->weight_stack >= MAX_WEIGHTS) { die("Too many weights"); }
             if(brain->weight_stack > brain->weight_stack_max) { brain->weight_stack_max = brain->weight_stack; }
             break;
@@ -199,23 +201,12 @@ void brain_constr_process_command(struct brain_t *brain, int command, int ix) {
 }
 
 
-// Sample simple brain
-struct brain_t *brain_constr_simple(void) {
-    struct brain_t *brain = brain_alloc();
-    brain_constr_init(brain);
-    brain_constr_process_command(brain, CMD_WEIGHT_TO_INPUT, 8);
-    brain_constr_process_command(brain, CMD_WEIGHT_TO_SUMSI_IN, 0);
-    brain_constr_process_command(brain, CMD_SUMSI_TO_OUT, -1);
-    return brain;
-}
-
-
 // Initialise a brain for thinking and learning
 void brain_play_init(struct brain_t *brain) {
     int i;
     for(i=0; i<=brain->weight_stack_max; i++) { 
         brain->weight_state[i] = 0;
-        brain->weights[i] = init_weight();
+        brain->weights[i] = brain->initial_weights[i] + getrand() / 100.; // a bit of noise
     }
     for(i=0; i<=brain->sumsi_stack_max; i++) { brain->sumsi_state[i] = 0; }
 }
@@ -300,6 +291,68 @@ void brain_play_step(struct brain_t *brain) {
 TYPE_VALUE brain_get_output(const struct brain_t *brain) {
     if(brain->output_conn == 0) { return 0; }
     return brain->sumsi_state[brain->output_conn];
+}
+
+
+// ==== GENES ====================================================================================================================
+
+struct genes_t {
+    TYPE_VALUE learning_rate;
+    int commands[MAX_GENES];
+    int args[MAX_GENES];
+    int length;
+};
+
+struct genes_t *genes_alloc() {
+    struct genes_t *genes = malloc(sizeof(struct genes_t));
+    if(genes == NULL) { die("Out of memory"); }
+    return genes;
+}
+
+void genes_init(struct genes_t *genes) {
+    genes->learning_rate = 1e-2;
+    
+    genes->commands[0] = CMD_WEIGHT_TO_INPUT;
+    genes->args[0] = 8;
+    
+    genes->commands[1] = CMD_WEIGHT_TO_SUMSI_IN;
+    genes->args[1] = 0;
+    
+    genes->commands[2] = CMD_SUMSI_TO_OUT;
+    genes->args[2] = 0; // dummy
+    
+    genes->length = 3;    
+}
+
+void genes_clone(const struct genes_t *source) {
+    int i;
+    struct genes_t *clone = genes_alloc();
+    clone->learning_rate = source->learning_rate;
+    for(i=0; i<source->length; i++) {
+        clone->commands[i] = source->commands[i];
+        clone->args[i] = source->args[i];
+    }
+}
+
+
+struct brain_t *genes_create_brain(const struct genes_t *genes) {
+    int i;
+    struct brain_t *brain = brain_alloc();
+    brain_constr_init(brain);
+    brain->learning_rate = genes->learning_rate;
+    for(i=0; i<genes->length; i++) {
+        brain_constr_process_command(brain, genes->commands[i], genes->args[i]);
+    }
+    return brain;
+}
+
+void genes_mutate_learning_rate(struct genes_t *genes) {
+    genes->learning_rate *= getrand() * .2 + .9;
+}
+
+void genes_mutate(struct genes_t *genes) {
+    genes_mutate_learning_rate(genes);
+    // TODO
 }
 
 
@@ -472,7 +525,7 @@ void task_get_question(
 // ==== EVALUATE ===================================================================================================================
 // Evaluate a brain against a task. It needs to learn and respond
 
-#define STEPS 5
+#define STEPS 500
 #define STEPS_TO_ANSWER 40
 
 // Return the energy of the brain (related to correct answers)
@@ -503,7 +556,7 @@ int evaluate(struct brain_t *brain, const struct task_t *task) {
         
         answer = (brain_get_output(brain) >= 0);
         if(answer == target) { energy++; } else { energy--; }
-        printf("Target: %d Answer: %d Energy: %d\n", target, answer, energy);
+        // printf("Target: %d Answer: %d Energy: %d\n", target, answer, energy);
         age++;
         if(age > STEPS) { break; }
     }
@@ -518,10 +571,12 @@ int main(void) {
     // See also https://linux.die.net/man/3/random_r
     srandom(time(NULL));
     
-    struct brain_t *brain = brain_constr_simple();
+    struct genes_t *genes = genes_alloc();
+    genes_init(genes);
+    struct brain_t *brain = genes_create_brain(genes);
     struct task_t *task = task_alloc();
     task_init(task);
-    evaluate(brain, task);    
+    printf("Ret: %d\n", evaluate(brain, task));    
     
     return 0;
 }
