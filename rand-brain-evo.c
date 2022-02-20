@@ -91,14 +91,16 @@ struct brain_t {
     int output_conn;
     
     TYPE_VALUE learning_rate;
+    int steps_to_output;
     TYPE_VALUE initial_weights[MAX_WEIGHTS];
     TYPE_VALUE weights[MAX_WEIGHTS];
     
-    // For initial calculations
+    // For internal calculations
     TYPE_VALUE weight_state[MAX_WEIGHTS];
     TYPE_VALUE sumsi_state[MAX_SUMSIS];
     TYPE_VALUE input_state[NUM_INPUTS];
 };
+
 
 struct brain_t *brain_alloc(int count) {
     struct brain_t *brain = malloc(count * sizeof(struct brain_t));
@@ -125,6 +127,7 @@ void brain_constr_init(struct brain_t *brain) {
     brain->output_conn = 0;
     for(i=0; i<MAX_WEIGHTS; i++) for(j=0; j<W_PIN__NUM; j++) brain->weight_conn[i][j] = 0;
     brain->learning_rate = 1e-5;
+    brain->steps_to_output = 60;
 }
 
 
@@ -306,6 +309,7 @@ TYPE_VALUE brain_get_output(const struct brain_t *brain) {
 
 struct genes_t {
     TYPE_VALUE learning_rate;
+    TYPE_VALUE steps_to_output;
     int commands[MAX_GENES];
     int args[MAX_GENES];
     int length;
@@ -322,6 +326,7 @@ struct genes_t *genes_alloc(int count) {
 // Initialise the genes
 void genes_init(struct genes_t *genes) {
     genes->learning_rate = 1e-2;
+    genes->steps_to_output = 10;
     
     genes->commands[0] = CMD_WEIGHT_TO_INPUT;
     genes->args[0] = 8;
@@ -339,6 +344,7 @@ void genes_init(struct genes_t *genes) {
 // Copy genes
 void genes_clone(const struct genes_t *source, struct genes_t *clone) {
     clone->learning_rate = source->learning_rate;
+    clone->steps_to_output = source->steps_to_output;
     for(int i=0; i<source->length; i++) {
         clone->commands[i] = source->commands[i];
         clone->args[i] = source->args[i];
@@ -349,6 +355,7 @@ void genes_clone(const struct genes_t *source, struct genes_t *clone) {
 // Print the genes
 void genes_print(const struct genes_t *genes) {
     printf("Learning rate: %f\n", genes->learning_rate);
+    printf("Steps: %f\n", genes->steps_to_output);
     printf("Length: %d\n", genes->length);
     for(int i=0; i<genes->length; i++) {
         printf("[%d,%d] ", genes->commands[i], genes->args[i]);
@@ -359,7 +366,7 @@ void genes_print(const struct genes_t *genes) {
 
 // Write genes into file
 void genes_write(const struct genes_t *genes, FILE *fp) {
-    fprintf(fp, "learning_rate=%f length=%d ", genes->learning_rate, genes->length);
+    fprintf(fp, "learning_rate=%f steps=%f length=%d ", genes->learning_rate, genes->steps_to_output, genes->length);
     for(int i=0; i<genes->length; i++) {
         fprintf(fp, "[%d,%d] ", genes->commands[i], genes->args[i]);
     }
@@ -373,6 +380,7 @@ void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
     int i;
     brain_constr_init(brain);
     brain->learning_rate = genes->learning_rate;
+    brain->steps_to_output = genes->steps_to_output;
     for(i=0; i<genes->length; i++) {
         if(genes->args[i] == ARG_RAND_WEIGHT) {
             genes->args[i] = (int)(getrand() * brain->weight_stack);
@@ -411,9 +419,11 @@ void genes_remove(struct genes_t *genes, const int location) {
     }
 }
 
+
+// Mutate a gene sequence
 void genes_mutate(struct genes_t *genes) {
-    static int modes_length = 12;
-    static TYPE_VALUE modes[12] = {
+    static int modes_length = 13;
+    static TYPE_VALUE modes[13] = {
         1, // 0: mutate learning rate
         1, // 1: inject CMD_SUMSI_TO_OUT
         2, // 2: inject CMD_POP_WEIGHT
@@ -425,7 +435,8 @@ void genes_mutate(struct genes_t *genes) {
         1, // 8: inject CMD_WEIGHT_TO_WEIGHT_CTRL to random weight unit
         1, // 9: inject CMD_WEIGHT_TO_SUMSI_IN to random sumsi unit
         2, // 10: new sumsi & connect to last weight
-        2  // 11: new weight & connect to last sumsi
+        2, // 11: new weight & connect to last sumsi
+        1  // 12: mutate steps
     };
     static int modes_init = 0;
     
@@ -475,7 +486,11 @@ void genes_mutate(struct genes_t *genes) {
             loc = getrand_location(genes->length);
             genes_inject(genes, loc, CMD_NEW_WEIGHT, (int)(getrand() * 200. - 100.));
             genes_inject(genes, loc+1, CMD_SUMSI_TO_WEIGHT_IN, 0);
-            break;            
+            break;
+        case 12:
+            genes->steps_to_output *= getrand() * .6 + .7; break;
+        default:
+            die("Unknown mutation mode");
     }
 }
 
@@ -651,13 +666,12 @@ void task_get_question(
 
 // How many questions to ask
 #define STEPS 600
-// How many ticks to wait before reading the answer
-#define STEPS_TO_ANSWER 60
 
 // Return the energy of the brain (related to correct answers)
 int evaluate(struct brain_t *brain, const struct task_t *task) {
     int target, answer, think, age=0;
     int energy = 0;
+    TYPE_VALUE steps_to_output_v;
     
     brain_play_init(brain);
     brain->input_state[8] = 1.; // bias
@@ -675,8 +689,9 @@ int evaluate(struct brain_t *brain, const struct task_t *task) {
         brain->input_state[6] = (TYPE_VALUE)energy;
         // Debug: task_plot(task, brain->input_state[0], brain->input_state[1], brain->input_state[2], brain->input_state[3], brain->input_state[4], brain->input_state[5]);
         
-        for(think=0; think<STEPS_TO_ANSWER; think++) {
-            brain->input_state[7] = ((TYPE_VALUE)think) / ((TYPE_VALUE)STEPS_TO_ANSWER); // clock
+        steps_to_output_v = brain->steps_to_output;
+        for(think = 0; think < brain->steps_to_output; think++) {
+            brain->input_state[7] = ((TYPE_VALUE)think) / steps_to_output_v; // clock
             brain_play_step(brain);
         }
         
@@ -693,12 +708,14 @@ int evaluate(struct brain_t *brain, const struct task_t *task) {
 // =======================================================================================================================
 
 // How many genes-brains to maintain
-#define POOL_SIZE 500
+// Since we always halve the pool, about 9 mutations are protected
+#define POOL_SIZE 1024
 
 // How many tasks to give
 #define TASK_NUM 40
 
-#define GENE_LENGTH_PENALTY (STEPS * TASK_NUM / MAX_WEIGHTS)
+// Penalise long sequences
+#define GENE_LENGTH_PENALTY (STEPS * TASK_NUM / MAX_WEIGHTS / 2.)
 
 // Compare integers
 static int cmpint(const void *p1, const void *p2) { return ( *((int*)p1) > *((int*)p2) ) - ( *((int*)p1) < *((int*)p2) ); }
@@ -782,6 +799,8 @@ int main(void) {
             // printf("Copying %d to %d\n", source_ix, target_ix);
             genes_clone(&genepool[source_ix], &genepool[target_ix]);
             genes_mutate(&genepool[target_ix]);
+            // Randomly, mutate twice
+            if(getrand() < .5) { genes_mutate(&genepool[target_ix]); }
             source_ix++;
             target_ix++;
             done++;
