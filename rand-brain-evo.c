@@ -698,6 +698,8 @@ int evaluate(struct brain_t *brain, const struct task_t *task) {
 // How many tasks to give
 #define TASK_NUM 40
 
+#define GENE_LENGTH_PENALTY (STEPS * TASK_NUM / MAX_WEIGHTS)
+
 // Compare integers
 static int cmpint(const void *p1, const void *p2) { return ( *((int*)p1) > *((int*)p2) ) - ( *((int*)p1) < *((int*)p2) ); }
 
@@ -735,7 +737,7 @@ int main(void) {
         // Create brains. This also fixes the genes
         for(i=0; i<POOL_SIZE; i++) {
             genes_create_brain(&genepool[i], &brainpool[i]);
-            results[i] = 0;
+            results[i] = 0 - GENE_LENGTH_PENALTY * genepool[i].length;
         }
         
         for(j=0; j<TASK_NUM; j++) {
