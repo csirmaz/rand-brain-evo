@@ -1,19 +1,20 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 #include <pthread.h>
 
 // Commands are used to construct a network and form the gene sequences / threads
-#define CMD_NEW_WEIGHT 1
-#define CMD_NEW_SUMSI 2
-#define CMD_SUMSI_TO_WEIGHT_IN 3
-#define CMD_SUMSI_TO_WEIGHT_CTRL 4
-#define CMD_WEIGHT_TO_SUMSI_IN 5
-#define CMD_WEIGHT_TO_WEIGHT_CTRL 6
-#define CMD_POP_WEIGHT 7
-#define CMD_POP_SUMSI 8
-#define CMD_WEIGHT_TO_INPUT 9
-#define CMD_SUMSI_TO_OUT 10
-#define CMD_CALL_THREAD 11 // TODO Not implemented yet
+#define CMD_NEW_WEIGHT 901
+#define CMD_NEW_SUMSI 902
+#define CMD_SUMSI_TO_WEIGHT_IN 903
+#define CMD_SUMSI_TO_WEIGHT_CTRL 904
+#define CMD_WEIGHT_TO_SUMSI_IN 905
+#define CMD_WEIGHT_TO_WEIGHT_CTRL 906
+#define CMD_POP_WEIGHT 907
+#define CMD_POP_SUMSI 908
+#define CMD_WEIGHT_TO_INPUT 909
+#define CMD_SUMSI_TO_OUT 910
+#define CMD_CALL_THREAD 911 // TODO Not implemented yet
 
 #define NUM_INPUTS 7 // red_example(x,y), blue_example(x,y), question(x,y), energy
 #define MAX_WEIGHTS 10000
@@ -27,13 +28,31 @@
 #define W_PIN_CTRL 4
 #define W_PIN_CTRL_TYPE 5
 
-#define TYPE_WEIGHT_CTRL 1
-#define TYPE_WEIGHT_OUT 2
-#define TYPE_SUMSI_IN 3
-#define TYPE_SUMSI_OUT 4
-#define TYPE_GLOBAL_IN 5
+#define TYPE_WEIGHT_CTRL 801
+#define TYPE_WEIGHT_OUT 802
+#define TYPE_SUMSI_IN 803
+#define TYPE_SUMSI_OUT 804
+#define TYPE_GLOBAL_IN 805
 
 #define TYPE_VALUE float
+
+// TODO Use double?
+// TODO Allocate memory for brains instead of static lists
+// TODO sanity check brain after creation (e.g. inputs and outputs are connected)
+
+
+void die(char *message) {
+    fprintf(stderr, "%s\n", message);
+    exit(1);
+}
+
+
+// Returns a random number between 0 and 1
+TYPE_VALUE getrand() {
+    return ((TYPE_VALUE)random()) / ((TYPE_VALUE)RAND_MAX);
+}
+
+// ==== BRAIN ====================================================================================================================
 
 struct brain_t {
     // Weight units have two inputs (input, control) and one output
@@ -53,7 +72,7 @@ struct brain_t {
     // weight_conn[i][W_PIN_IN_TYPE] -- whether it is TYPE_GLOBAL_IN or TYPE_SUMSI_OUT
     // weight_conn[i][W_PIN_CTRL] -- which whatever the control is coming from
     // weight_conn[i][W_PIN_CTRL_TYPE] -- whether it is TYPE_WEIGHT_OUT or TYPE_SUMSI_OUT
-    int weight_conn[MAX_WEIGHTS][W_PIN__NUM]
+    int weight_conn[MAX_WEIGHTS][W_PIN__NUM];
     
     // Which weights are inputs connected to? (For sanity checking)
     int input_conn[NUM_INPUTS];
@@ -66,31 +85,41 @@ struct brain_t {
     TYPE_VALUE weight_state[MAX_WEIGHTS];
     TYPE_VALUE sumsi_state[MAX_SUMSIS];
     TYPE_VALUE input_state[NUM_INPUTS];
+};
+
+struct brain_t *brain_alloc(void) {
+    struct brain_t *brain = malloc(sizeof(struct brain_t));
+    if(brain == NULL) { die("Out of memory"); }
+    return brain;
 }
 
+// Return an initial value for a weight
+TYPE_VALUE init_weight() {
+    return getrand() * 2. - 1.;
+}
 
-void die(char *message) {
-    fprintf(stderr, "%s\n", message);
-    exit(1);
+// Implements the nonlinearity that sumsis use
+TYPE_VALUE nonlinearity(TYPE_VALUE x) {
+    return (x < 0 ? x / 10. : x);
 }
 
 
 // Initialise a brain for construction
-void brain_constr_init(const struct brain_t *brain) {
+void brain_constr_init(struct brain_t *brain) {
     int i, j;
     brain->weight_stack = 1; // start with 1 so 0 can mean unconnected
     brain->weight_stack_max = 1;
     brain->sumsi_stack = 1; // start with 1 so 0 can mean unconnected
     brain->sumsi_stack_max = 1;
     for(i=0; i<NUM_INPUTS; i++) { brain->input_conn[i] = 0; } // unconnected
-    brain->output = 0;
+    brain->output_conn = 0;
     for(i=0; i<MAX_WEIGHTS; i++) for(j=0; j<W_PIN__NUM; j++) brain->weight_conn[i][j] = 0;
     brain->learning_rate = 1e-5;
 }
 
 
 // Construction: process a command in the gene sequence
-void brain_constr_process_command(const struct brain_t *brain, int command, int ix) {
+void brain_constr_process_command(struct brain_t *brain, int command, int ix) {
     int p;
 
     switch(command) {
@@ -167,20 +196,18 @@ void brain_constr_process_command(const struct brain_t *brain, int command, int 
 }
 
 
-
-
 // Initialise a brain for thinking and learning
-void brain_play_init(const struct brain_t *brain) {
+void brain_play_init(struct brain_t *brain) {
     int i;
-    for(i=0; i<MAX_WEIGHTS; i++) { 
+    for(i=0; i<=brain->weight_stack_max; i++) { 
         brain->weight_state[i] = 0;
-        brain->weights[i] = rand_0_1();
+        brain->weights[i] = init_weight();
     }
-    for(i=0; i<MAX_SUMSIS; i++) { brain->sumsi_state[i] = 0; }
+    for(i=0; i<=brain->sumsi_stack_max; i++) { brain->sumsi_state[i] = 0; }
 }
 
-// Perform one step of thinking
-void brain_play_step(const struct brain_t *brain) {
+// Perform one step of thinking and learning
+void brain_play_step(struct brain_t *brain) {
     int i, p;
     TYPE_VALUE ctrl;
 
@@ -255,9 +282,125 @@ void brain_play_step(const struct brain_t *brain) {
 
 // Return the output from the brain
 TYPE_VALUE brain_get_output(const struct brain_t *brain) {
+    if(brain->output_conn == 0) { return 0; }
     return brain->sumsi_state[brain->output_conn];
 }
 
-TYPE_VALUE nonlinearity(TYPE_VALUE x) {
-    return (x < 0 ? x / 10 : x);
+// ==== TASK ===================================================================================================================
+// Create a wavy surface
+
+struct task_t {
+    TYPE_VALUE x_freq1;
+    TYPE_VALUE x_phase1;
+
+    TYPE_VALUE y_freq1;
+    TYPE_VALUE y_phase1;
+
+    TYPE_VALUE x_freq2;
+    TYPE_VALUE x_phase2;
+
+    TYPE_VALUE y_freq2;
+    TYPE_VALUE y_phase2;
+    
+    TYPE_VALUE pol_freq;
+    TYPE_VALUE pol_phase;
+};
+
+TYPE_VALUE task_init_freq(void) {
+    TYPE_VALUE min_freq = .2;
+    TYPE_VALUE max_freq = 6.;
+    return min_freq + getrand() * (max_freq - min_freq);    
+}
+
+TYPE_VALUE task_init_phase(void) {
+    return getrand() * 3.14159;
+}
+
+struct task_t *task_alloc(void) {
+    struct task_t *task = malloc(sizeof(struct task_t));
+    if(task == NULL) { die("Out of memory"); }
+    return task;
+}
+
+// Get a value on the surface. Call with x, y in [-1, 1]
+TYPE_VALUE task_get_value(const struct task_t *task, TYPE_VALUE x, TYPE_VALUE y) {
+    TYPE_VALUE o = 0, pol;
+    o += sin(task->x_freq1 * x + task->x_phase1);
+    o += sin(task->y_freq1 * y + task->y_phase1);
+    o += sin(task->x_freq2 * x + task->x_phase2);
+    o += sin(task->y_freq2 * y + task->y_phase2);
+    pol = sqrt(x*x + y*y);
+    o += sin(task->pol_freq * pol + task->pol_phase);
+    return o;
+}
+
+
+// Ensure we get both a positive an negative result from the surface
+int task_evaluate(const struct task_t *task) {
+    int i, j, has_pos=0, has_neg=0;
+    TYPE_VALUE zoom = 10., x, y, v;
+    
+    for(i=0; i<zoom*2; i++) {
+        x = (i / zoom) - 1.;
+        for(j=0; j<zoom*2; j++) {
+            y = (j / zoom) - 1.;
+            v =task_get_value(task, x, y);
+            if(v > 0) { has_pos = 1; }
+            if(v < 0) { has_neg = 1; }
+        }
+        if(has_pos && has_neg) { return 1; }
+    }
+    return 0;
+}
+
+
+// Initialise the surface
+void task_init(struct task_t *task) {
+    while(1) {
+        task->x_freq1 = task_init_freq();
+        task->y_freq1 = task_init_freq();
+        task->x_freq1 = task_init_freq();
+        task->y_freq2 = task_init_freq();
+        task->pol_freq = task_init_freq();
+        task->x_phase1 = task_init_phase();
+        task->x_phase1 = task_init_phase();
+        task->y_phase2 = task_init_phase();
+        task->y_phase2 = task_init_phase();
+        task->pol_phase = task_init_phase();
+        if(task_evaluate(task)) { break; }
+    }
+}
+
+
+// Print a plot of a task (surface)
+void task_plot(const struct task_t *task) {
+    int i, j;
+    TYPE_VALUE zoom = 20., x, y;
+    
+    for(i=0; i<zoom*2; i++) {
+        x = (i / zoom) - 1.;
+        for(j=0; j<zoom*2; j++) {
+            y = (j / zoom) - 1.;
+            printf("%s", (task_get_value(task, x, y) >= 0 ? "##" : "--"));
+        }
+        printf("\n");
+    }
+}
+
+void task_test(void) {
+    struct task_t *task = task_alloc();
+    task_init(task);
+    task_plot(task);
+}
+
+// =======================================================================================================================
+
+int main(void) {
+    
+    // See also https://linux.die.net/man/3/random_r
+    srandom(time(NULL));
+    
+    task_test();
+    
+    return 0;
 }
