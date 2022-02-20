@@ -16,7 +16,7 @@
 #define CMD_SUMSI_TO_OUT 910
 #define CMD_CALL_THREAD 911 // TODO Not implemented yet
 
-#define NUM_INPUTS 7 // red_example(x,y), blue_example(x,y), question(x,y), energy
+#define NUM_INPUTS 9 // red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
 #define MAX_WEIGHTS 10000
 #define MAX_SUMSIS 100
 
@@ -51,6 +51,7 @@ void die(char *message) {
 TYPE_VALUE getrand() {
     return ((TYPE_VALUE)random()) / ((TYPE_VALUE)RAND_MAX);
 }
+
 
 // ==== BRAIN ====================================================================================================================
 
@@ -189,10 +190,23 @@ void brain_constr_process_command(struct brain_t *brain, int command, int ix) {
             // TODO Allow override?
             // TODO Allow on non-main thread?
             brain->output_conn = brain->sumsi_stack;
+            break;
         default:
+            // printf("Command: %d", command);
             die("Unknown command");
     }
     
+}
+
+
+// Sample simple brain
+struct brain_t *brain_constr_simple(void) {
+    struct brain_t *brain = brain_alloc();
+    brain_constr_init(brain);
+    brain_constr_process_command(brain, CMD_WEIGHT_TO_INPUT, 8);
+    brain_constr_process_command(brain, CMD_WEIGHT_TO_SUMSI_IN, 0);
+    brain_constr_process_command(brain, CMD_SUMSI_TO_OUT, -1);
+    return brain;
 }
 
 
@@ -205,6 +219,7 @@ void brain_play_init(struct brain_t *brain) {
     }
     for(i=0; i<=brain->sumsi_stack_max; i++) { brain->sumsi_state[i] = 0; }
 }
+
 
 // Perform one step of thinking and learning
 void brain_play_step(struct brain_t *brain) {
@@ -280,11 +295,13 @@ void brain_play_step(struct brain_t *brain) {
     
 }
 
+
 // Return the output from the brain
 TYPE_VALUE brain_get_output(const struct brain_t *brain) {
     if(brain->output_conn == 0) { return 0; }
     return brain->sumsi_state[brain->output_conn];
 }
+
 
 // ==== TASK ===================================================================================================================
 // Create a wavy surface
@@ -335,22 +352,22 @@ TYPE_VALUE task_get_value(const struct task_t *task, TYPE_VALUE x, TYPE_VALUE y)
 }
 
 
-// Ensure we get both a positive an negative result from the surface
+// Ensure the positive and negative areas are roughly equal so the test set (the questions) would be evenly distributed
+#define TASK_EVAL_ZOOM 20.
 int task_evaluate(const struct task_t *task) {
-    int i, j, has_pos=0, has_neg=0;
-    TYPE_VALUE zoom = 10., x, y, v;
+    int i, j, num_pos=0, num_neg=0;
+    TYPE_VALUE x, y, v;
     
-    for(i=0; i<zoom*2; i++) {
-        x = (i / zoom) - 1.;
-        for(j=0; j<zoom*2; j++) {
-            y = (j / zoom) - 1.;
+    for(i=0; i<TASK_EVAL_ZOOM*2.; i++) {
+        x = (i / TASK_EVAL_ZOOM) - 1.;
+        for(j=0; j<TASK_EVAL_ZOOM*2.; j++) {
+            y = (j / TASK_EVAL_ZOOM) - 1.;
             v =task_get_value(task, x, y);
-            if(v > 0) { has_pos = 1; }
-            if(v < 0) { has_neg = 1; }
+            if(v > 0) { num_pos++; }
+            if(v < 0) { num_neg++; }
         }
-        if(has_pos && has_neg) { return 1; }
     }
-    return 0;
+    return abs(num_pos - num_neg) < (TASK_EVAL_ZOOM * TASK_EVAL_ZOOM * .05);
 }
 
 
@@ -373,25 +390,126 @@ void task_init(struct task_t *task) {
 
 
 // Print a plot of a task (surface)
-void task_plot(const struct task_t *task) {
+void task_plot(
+    const struct task_t *task,
+    const TYPE_VALUE x1,
+    const TYPE_VALUE y1,
+    const TYPE_VALUE x2,
+    const TYPE_VALUE y2,
+    const TYPE_VALUE x3,
+    const TYPE_VALUE y3
+) {
     int i, j;
+    char c;
     TYPE_VALUE zoom = 20., x, y;
     
-    for(i=0; i<zoom*2; i++) {
+    for(i=0; i<zoom*2.; i++) {
         x = (i / zoom) - 1.;
-        for(j=0; j<zoom*2; j++) {
+        for(j=0; j<zoom*2.; j++) {
             y = (j / zoom) - 1.;
-            printf("%s", (task_get_value(task, x, y) >= 0 ? "##" : "--"));
+            c = (task_get_value(task, x, y) >= 0 ? '#' : '-');
+            printf("%c", c);
+            if(fabs(x-x1) < .05 && fabs(y-y1) < .05) { c = '1'; }
+            if(fabs(x-x2) < .05 && fabs(y-y2) < .05) { c = '2'; }
+            if(fabs(x-x3) < .05 && fabs(y-y3) < .05) { c = 'Q'; }
+            printf("%c", c);
         }
         printf("\n");
     }
 }
 
+
+// Test the task code by printing sample surfaces
 void task_test(void) {
     struct task_t *task = task_alloc();
     task_init(task);
-    task_plot(task);
+    task_plot(task, 0,0,0,0,0,0);
 }
+
+
+// Get a random coordinate value
+TYPE_VALUE task_get_coord(void) {
+    return getrand() * 2. - 1.;
+}
+
+
+// Get a training question from a task
+// This returns the coordinates of a positive point, the coordinates of a negative point, a question point and a target answer
+void task_get_question(
+    const struct task_t *task,
+    TYPE_VALUE *pos_x, 
+    TYPE_VALUE *pos_y,
+    TYPE_VALUE *neg_x,
+    TYPE_VALUE *neg_y,
+    TYPE_VALUE *question_x,
+    TYPE_VALUE *question_y,
+    int *target
+) {
+    TYPE_VALUE x, y;
+    int no_pos = 1, no_neg = 1;
+    while(no_pos || no_neg) {
+        x = task_get_coord();
+        y = task_get_coord();
+        if(task_get_value(task, x, y) < 0) {
+            no_neg = 0;
+            *neg_x = x;
+            *neg_y = y;
+        }
+        else {
+            no_pos = 0;
+            *pos_x = x;
+            *pos_y = y;
+        }
+    }
+    x = task_get_coord();
+    y = task_get_coord();
+    *question_x = x;
+    *question_y = y;
+    *target = (task_get_value(task, x, y) >= 0);
+}
+
+
+// ==== EVALUATE ===================================================================================================================
+// Evaluate a brain against a task. It needs to learn and respond
+
+#define STEPS 5
+#define STEPS_TO_ANSWER 40
+
+// Return the energy of the brain (related to correct answers)
+int evaluate(struct brain_t *brain, const struct task_t *task) {
+    int target, answer, think, age=0;
+    int energy = 0;
+    
+    brain_play_init(brain);
+    brain->input_state[8] = 1.; // bias
+    while(1) {
+        task_get_question(
+            task, 
+            &brain->input_state[0], // pos_x
+            &brain->input_state[1], 
+            &brain->input_state[2], 
+            &brain->input_state[3], 
+            &brain->input_state[4], 
+            &brain->input_state[5], // question_y
+            &target
+        );
+        brain->input_state[6] = (TYPE_VALUE)energy;
+        // Debug: task_plot(task, brain->input_state[0], brain->input_state[1], brain->input_state[2], brain->input_state[3], brain->input_state[4], brain->input_state[5]);
+        
+        for(think=0; think<STEPS_TO_ANSWER; think++) {
+            brain->input_state[7] = ((TYPE_VALUE)think) / ((TYPE_VALUE)STEPS_TO_ANSWER); // clock
+            brain_play_step(brain);
+        }
+        
+        answer = (brain_get_output(brain) >= 0);
+        if(answer == target) { energy++; } else { energy--; }
+        printf("Target: %d Answer: %d Energy: %d\n", target, answer, energy);
+        age++;
+        if(age > STEPS) { break; }
+    }
+    return energy;
+}
+
 
 // =======================================================================================================================
 
@@ -400,7 +518,10 @@ int main(void) {
     // See also https://linux.die.net/man/3/random_r
     srandom(time(NULL));
     
-    task_test();
+    struct brain_t *brain = brain_constr_simple();
+    struct task_t *task = task_alloc();
+    task_init(task);
+    evaluate(brain, task);    
     
     return 0;
 }
