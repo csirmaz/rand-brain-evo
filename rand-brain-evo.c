@@ -100,8 +100,8 @@ struct brain_t {
     TYPE_VALUE input_state[NUM_INPUTS];
 };
 
-struct brain_t *brain_alloc(void) {
-    struct brain_t *brain = malloc(sizeof(struct brain_t));
+struct brain_t *brain_alloc(int count) {
+    struct brain_t *brain = malloc(count * sizeof(struct brain_t));
     if(brain == NULL) { die("Out of memory"); }
     return brain;
 }
@@ -312,8 +312,8 @@ struct genes_t {
 };
 
 
-struct genes_t *genes_alloc() {
-    struct genes_t *genes = malloc(sizeof(struct genes_t));
+struct genes_t *genes_alloc(int count) {
+    struct genes_t *genes = malloc(count * sizeof(struct genes_t));
     if(genes == NULL) { die("Out of memory"); }
     return genes;
 }
@@ -336,16 +336,13 @@ void genes_init(struct genes_t *genes) {
 }
 
 
-// Create a clone of the genes
-const struct genes_t *genes_clone(const struct genes_t *source) {
-    int i;
-    struct genes_t *clone = genes_alloc();
+// Copy genes
+void genes_clone(const struct genes_t *source, struct genes_t *clone) {
     clone->learning_rate = source->learning_rate;
-    for(i=0; i<source->length; i++) {
+    for(int i=0; i<source->length; i++) {
         clone->commands[i] = source->commands[i];
         clone->args[i] = source->args[i];
     }
-    return clone;
 }
 
 
@@ -360,11 +357,10 @@ void genes_print(const struct genes_t *genes) {
 }
 
 
-// Create a brain based on the genes
+// Create a brain based on the genes at the given location
 // Tie down random offsets in the genes as we do so
-struct brain_t *genes_create_brain(struct genes_t *genes) {
+void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
     int i;
-    struct brain_t *brain = brain_alloc();
     brain_constr_init(brain);
     brain->learning_rate = genes->learning_rate;
     for(i=0; i<genes->length; i++) {
@@ -376,7 +372,6 @@ struct brain_t *genes_create_brain(struct genes_t *genes) {
         }
         brain_constr_process_command(brain, genes->commands[i], genes->args[i]);
     }
-    return brain;
 }
 
 
@@ -426,18 +421,20 @@ void genes_mutate(struct genes_t *genes) {
     
     // Create probability boundaries
     if(modes_init == 0) {
+        modes_init = 1;
         int i;
         TYPE_VALUE s = 0;
         for(i=0; i<modes_length; i++) { 
             s += modes[i];
             modes[i] = s;
         }
-        for(i=0; i<modes_length; i++) { modes[i] /= s; }
+        for(i=0; i<modes_length; i++) { modes[i] /= s; /* printf("MODE %d = %f\n",i,modes[i]); */ }
     }
     
     TYPE_VALUE mode_v = getrand();
     int mode = 0, loc;
     while(modes[mode] < mode_v && mode < modes_length) { mode++; }
+    // printf("Mutate mode_v: %f mode: %d\n", mode_v, mode);
     switch(mode) {
         case 0: // mutate learning rate
             genes->learning_rate *= getrand() * .2 + .9; break;
@@ -642,8 +639,10 @@ void task_get_question(
 // ==== EVALUATE ===================================================================================================================
 // Evaluate a brain against a task. It needs to learn and respond
 
-#define STEPS 500
-#define STEPS_TO_ANSWER 40
+// How many questions to ask
+#define STEPS 1000
+// How many ticks to wait before reading the answer
+#define STEPS_TO_ANSWER 60
 
 // Return the energy of the brain (related to correct answers)
 int evaluate(struct brain_t *brain, const struct task_t *task) {
@@ -683,21 +682,91 @@ int evaluate(struct brain_t *brain, const struct task_t *task) {
 
 // =======================================================================================================================
 
+// How many genes-brains to maintain
+#define POOL_SIZE 100
+
+// How many tasks to give
+#define TASK_NUM 40
+
+static int cmpint(const void *p1, const void *p2) { return ( *((int*)p1) > *((int*)p2) ) - ( *((int*)p1) < *((int*)p2) ); }
+
 int main(void) {
+    int i, j;
+    struct task_t *task;
     
     // See also https://linux.die.net/man/3/random_r
     srandom(time(NULL));
     
-    struct genes_t *genes = genes_alloc();
-    genes_init(genes);
-    genes_print(genes);
-    genes_mutate(genes);
-    genes_print(genes);    
-    struct brain_t *brain = genes_create_brain(genes);
-    genes_print(genes);    
-    struct task_t *task = task_alloc();
-    task_init(task);
-    printf("Ret: %d\n", evaluate(brain, task));    
+    struct genes_t *genepool;
+    genepool = genes_alloc(POOL_SIZE);
+    for(i=0; i<POOL_SIZE; i++) {
+        genes_init(&genepool[i]);
+        genes_mutate(&genepool[i]);
+        // genes_print(&genepool[i]);
+    }
     
+    struct brain_t *brainpool;
+    brainpool = brain_alloc(POOL_SIZE);
+    
+    int results[POOL_SIZE];
+    int results2[POOL_SIZE];
+    task = task_alloc();
+    
+    while(1) {
+        
+        // Create brains. This also fixes the genes
+        for(i=0; i<POOL_SIZE; i++) {
+            genes_create_brain(&genepool[i], &brainpool[i]);
+            results[i] = 0;
+        }
+        
+        for(j=0; j<TASK_NUM; j++) {
+            // Create a new task
+            task_init(task);
+            // Give the task to the brains
+            for(i=0; i<POOL_SIZE; i++) {
+                results[i] += evaluate(&brainpool[i], task);
+            }
+        }
+    
+        // Order the brains
+        for(i=0; i<POOL_SIZE; i++) {
+            results2[i] = results[i];
+        }
+        qsort(results2, POOL_SIZE, sizeof(int), cmpint);
+        int median = results2[POOL_SIZE / 2];
+        // for(i=0; i<POOL_SIZE; i++) printf("%d ", results[i]); printf("median: %d\n", median);
+        // for(i=0; i<POOL_SIZE; i++) printf("%d ", results2[i]); printf("median: %d\n", median);
+        printf("Best: %f Median: %f\n", ((float)results2[POOL_SIZE-1]) / STEPS / TASK_NUM * 100., ((float)median) / STEPS / TASK_NUM * 100.);
+        
+        // We keep half of them
+        int selected = 0;
+        for(i=0; i<POOL_SIZE; i++) {
+            results2[i] = (results[i] > median);
+            if(results2[i]) { selected++; }
+        }
+        for(i=0; i<POOL_SIZE; i++) {
+            if(selected >= POOL_SIZE / 2) { break; }
+            if(!results2[i] && results[i] >= median) { results2[i] = 1; selected++; }
+        }
+        // for(i=0; i<POOL_SIZE; i++) { printf("%d: Result: %d Selected: %d\n", i, results[i], results2[i]); }
+        // printf("selected: %d\n", selected);
+        
+        // Now clone and mutate
+        int source_ix = 0;
+        int target_ix = 0;
+        int done = 0;
+        while(done < POOL_SIZE / 2) {
+            while(results2[source_ix] != 1) { source_ix++; }
+            while(results2[target_ix] != 0) { target_ix++; }
+            // printf("Copying %d to %d\n", source_ix, target_ix);
+            genes_clone(&genepool[source_ix], &genepool[target_ix]);
+            genes_mutate(&genepool[target_ix]);
+            source_ix++;
+            target_ix++;
+            done++;
+        }
+    }
+        
     return 0;
 }
