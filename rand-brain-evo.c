@@ -357,6 +357,16 @@ void genes_print(const struct genes_t *genes) {
 }
 
 
+// Write genes into file
+void genes_write(const struct genes_t *genes, FILE *fp) {
+    fprintf(fp, "learning_rate=%f length=%d ", genes->learning_rate, genes->length);
+    for(int i=0; i<genes->length; i++) {
+        fprintf(fp, "[%d,%d] ", genes->commands[i], genes->args[i]);
+    }
+    fprintf(fp, "\n");
+}
+
+
 // Create a brain based on the genes at the given location
 // Tie down random offsets in the genes as we do so
 void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
@@ -640,7 +650,7 @@ void task_get_question(
 // Evaluate a brain against a task. It needs to learn and respond
 
 // How many questions to ask
-#define STEPS 1000
+#define STEPS 600
 // How many ticks to wait before reading the answer
 #define STEPS_TO_ANSWER 60
 
@@ -683,15 +693,23 @@ int evaluate(struct brain_t *brain, const struct task_t *task) {
 // =======================================================================================================================
 
 // How many genes-brains to maintain
-#define POOL_SIZE 100
+#define POOL_SIZE 500
 
 // How many tasks to give
 #define TASK_NUM 40
 
+// Compare integers
 static int cmpint(const void *p1, const void *p2) { return ( *((int*)p1) > *((int*)p2) ) - ( *((int*)p1) < *((int*)p2) ); }
 
+void dump_genepool(struct genes_t *genepool) {
+    printf("Writing to file...\n");
+    FILE *outfile = fopen("genepool.dat", "w+");
+    for(int i=0; i<POOL_SIZE; i++) { genes_write(&genepool[i], outfile); }
+    fclose(outfile);
+}
+
 int main(void) {
-    int i, j;
+    int i, j, evo_steps=0;
     struct task_t *task;
     
     // See also https://linux.die.net/man/3/random_r
@@ -766,6 +784,9 @@ int main(void) {
             target_ix++;
             done++;
         }
+        
+        if((evo_steps % 10) == 0) { dump_genepool(genepool); }
+        evo_steps++;
     }
         
     return 0;
