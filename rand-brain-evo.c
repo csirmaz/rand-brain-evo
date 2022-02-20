@@ -16,6 +16,10 @@
 #define CMD_SUMSI_TO_OUT 910
 #define CMD_CALL_THREAD 911 // TODO Not implemented yet
 
+#define ARG_DUMMY -1
+#define ARG_RAND_WEIGHT -2
+#define ARG_RAND_SUMSI -3
+
 #define NUM_INPUTS 9 // red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
 #define MAX_WEIGHTS 10000
 #define MAX_SUMSIS 100
@@ -53,6 +57,10 @@ TYPE_VALUE getrand() {
     return ((TYPE_VALUE)random()) / ((TYPE_VALUE)RAND_MAX);
 }
 
+
+int getrand_location(const int length) {
+    return (int)(getrand() * (length + 1));
+}
 
 // ==== BRAIN ====================================================================================================================
 
@@ -303,12 +311,15 @@ struct genes_t {
     int length;
 };
 
+
 struct genes_t *genes_alloc() {
     struct genes_t *genes = malloc(sizeof(struct genes_t));
     if(genes == NULL) { die("Out of memory"); }
     return genes;
 }
 
+
+// Initialise the genes
 void genes_init(struct genes_t *genes) {
     genes->learning_rate = 1e-2;
     
@@ -319,12 +330,14 @@ void genes_init(struct genes_t *genes) {
     genes->args[1] = 0;
     
     genes->commands[2] = CMD_SUMSI_TO_OUT;
-    genes->args[2] = 0; // dummy
+    genes->args[2] = ARG_DUMMY;
     
     genes->length = 3;    
 }
 
-void genes_clone(const struct genes_t *source) {
+
+// Create a clone of the genes
+const struct genes_t *genes_clone(const struct genes_t *source) {
     int i;
     struct genes_t *clone = genes_alloc();
     clone->learning_rate = source->learning_rate;
@@ -332,27 +345,131 @@ void genes_clone(const struct genes_t *source) {
         clone->commands[i] = source->commands[i];
         clone->args[i] = source->args[i];
     }
+    return clone;
 }
 
 
-struct brain_t *genes_create_brain(const struct genes_t *genes) {
+// Print the genes
+void genes_print(const struct genes_t *genes) {
+    printf("Learning rate: %f\n", genes->learning_rate);
+    printf("Length: %d\n", genes->length);
+    for(int i=0; i<genes->length; i++) {
+        printf("[%d,%d] ", genes->commands[i], genes->args[i]);
+    }
+    printf("\n");
+}
+
+
+// Create a brain based on the genes
+// Tie down random offsets in the genes as we do so
+struct brain_t *genes_create_brain(struct genes_t *genes) {
     int i;
     struct brain_t *brain = brain_alloc();
     brain_constr_init(brain);
     brain->learning_rate = genes->learning_rate;
     for(i=0; i<genes->length; i++) {
+        if(genes->args[i] == ARG_RAND_WEIGHT) {
+            genes->args[i] = (int)(getrand() * brain->weight_stack);
+        }
+        else if(genes->args[i] == ARG_RAND_SUMSI) {
+            genes->args[i] = (int)(getrand() * brain->sumsi_stack);
+        }
         brain_constr_process_command(brain, genes->commands[i], genes->args[i]);
     }
     return brain;
 }
 
-void genes_mutate_learning_rate(struct genes_t *genes) {
-    genes->learning_rate *= getrand() * .2 + .9;
+
+// Inject a command at location
+void genes_inject(struct genes_t *genes, const int location, const int command, const int arg) {
+    if(location > genes->length) { die("Inject over end"); }
+    if(genes->length >= MAX_GENES) { die("Genes too long"); }
+    if(location < genes->length) {
+        for(int i=genes->length; i>location; i--) {
+            genes->commands[i] = genes->commands[i-1];
+            genes->args[i] = genes->args[i-1];
+        }
+    }
+    genes->commands[location] = command;
+    genes->args[location] = arg;
+    genes->length++;
+}
+
+
+// Remove a command at location
+void genes_remove(struct genes_t *genes, const int location) {
+    if(genes->length <= 1) { return; }
+    genes->length--;
+    for(int i=location; i<genes->length; i++) {
+        genes->commands[i] = genes->commands[i+1];
+        genes->args[i] = genes->args[i+1];
+    }
 }
 
 void genes_mutate(struct genes_t *genes) {
-    genes_mutate_learning_rate(genes);
-    // TODO
+    static int modes_length = 12;
+    static TYPE_VALUE modes[12] = {
+        1, // 0: mutate learning rate
+        1, // 1: inject CMD_SUMSI_TO_OUT
+        2, // 2: inject CMD_POP_WEIGHT
+        2, // 3: inject CMD_POP_SUMSI
+        1, // 4: inject CMD_WEIGHT_TO_INPUT with random input
+        7, // 5: remove command
+        1, // 6: inject CMD_SUMSI_TO_WEIGHT_IN to random weight unit
+        1, // 7: inject CMD_SUMSI_TO_WEIGHT_CTRL to random weight unit
+        1, // 8: inject CMD_WEIGHT_TO_WEIGHT_CTRL to random weight unit
+        1, // 9: inject CMD_WEIGHT_TO_SUMSI_IN to random sumsi unit
+        2, // 10: new sumsi & connect to last weight
+        2  // 11: new weight & connect to last sumsi
+    };
+    static int modes_init = 0;
+    
+    // Create probability boundaries
+    if(modes_init == 0) {
+        int i;
+        TYPE_VALUE s = 0;
+        for(i=0; i<modes_length; i++) { 
+            s += modes[i];
+            modes[i] = s;
+        }
+        for(i=0; i<modes_length; i++) { modes[i] /= s; }
+    }
+    
+    TYPE_VALUE mode_v = getrand();
+    int mode = 0, loc;
+    while(modes[mode] < mode_v && mode < modes_length) { mode++; }
+    switch(mode) {
+        case 0: // mutate learning rate
+            genes->learning_rate *= getrand() * .2 + .9; break;
+        case 1:
+            genes_inject(genes, getrand_location(genes->length), CMD_SUMSI_TO_OUT, ARG_DUMMY); break;
+        case 2:
+            genes_inject(genes, getrand_location(genes->length), CMD_POP_WEIGHT, ARG_DUMMY); break;
+        case 3:
+            genes_inject(genes, getrand_location(genes->length), CMD_POP_SUMSI, ARG_DUMMY); break;
+        case 4:
+            genes_inject(genes, getrand_location(genes->length), CMD_WEIGHT_TO_INPUT, ((int)(getrand() * NUM_INPUTS))); break;
+        case 5:
+            genes_remove(genes, ((int)(getrand() * genes->length))); break;
+        case 6:
+            genes_inject(genes, getrand_location(genes->length), CMD_SUMSI_TO_WEIGHT_IN, ARG_RAND_WEIGHT); break;
+        case 7:
+            genes_inject(genes, getrand_location(genes->length), CMD_SUMSI_TO_WEIGHT_CTRL, ARG_RAND_WEIGHT); break;
+        case 8:
+            genes_inject(genes, getrand_location(genes->length), CMD_WEIGHT_TO_WEIGHT_CTRL, ARG_RAND_WEIGHT); break;
+        case 9:
+            genes_inject(genes, getrand_location(genes->length), CMD_WEIGHT_TO_SUMSI_IN, ARG_RAND_SUMSI); break;
+        case 10:
+            loc = getrand_location(genes->length);
+            genes_inject(genes, loc, CMD_NEW_SUMSI, ARG_DUMMY);
+            genes_inject(genes, loc+1, CMD_WEIGHT_TO_SUMSI_IN, 0);
+            break;
+        case 11:
+            loc = getrand_location(genes->length);
+            genes_inject(genes, loc, CMD_NEW_WEIGHT, (int)(getrand() * 200. - 100.));
+            genes_inject(genes, loc+1, CMD_SUMSI_TO_WEIGHT_IN, 0);
+            break;            
+    }
 }
 
 
@@ -573,7 +690,11 @@ int main(void) {
     
     struct genes_t *genes = genes_alloc();
     genes_init(genes);
+    genes_print(genes);
+    genes_mutate(genes);
+    genes_print(genes);    
     struct brain_t *brain = genes_create_brain(genes);
+    genes_print(genes);    
     struct task_t *task = task_alloc();
     task_init(task);
     printf("Ret: %d\n", evaluate(brain, task));    
