@@ -579,7 +579,7 @@ void genes_mutate(struct genes_t *genes) {
 
 void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, struct genes_t *dst1, struct genes_t *dst2) {
     TYPE_VALUE start, end, snip;
-    int start1, start2, end1, end2, i;
+    int start1, start2, end1, end2, i, a, b;
     
     snip = getrand() * .8; // length of snippet (0..1)
     start = getrand() * (1. - snip); // starting point (0..1)
@@ -590,6 +590,8 @@ void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, str
     end1 = src1->length * end;
     end2 = src2->length * end;
     
+    // printf("XO snip %f start %f end %f start1 %d end1 %d L1 %d start2 %d end2 %d L2 %d\n",snip,start,end,start1,end1,src1->length,start2,end2,src2->length);
+    
     // src1:  0 a1a1a1 start1 b1b1b1 end1 c1c1c1
     // src2:  0 a2a2a2 start2 b2b2b2 end2 c2c2c2
     
@@ -599,33 +601,59 @@ void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, str
     dst1->learning_rate = src1->learning_rate * (1. - snip) + src2->learning_rate * snip;
     dst1->thinking_time = src1->thinking_time * (1. - snip) + src2->thinking_time * snip;
     dst1->length = start1 + (end2 - start2) + (src1->length - end1);
-    for(i=0; i<start1; i++) { 
-        dst1->commands[i] = src1->commands[i]; 
-        dst1->args[i]     = src1->args[i]; 
+    for(i=0; i<start1; i++) {
+        a = i;
+        b = i;
+        if(a >= dst1->length) { die("Crossover E1"); }
+        if(b >= src1->length) { die("Crossover E2"); }
+        dst1->commands[a] = src1->commands[b]; 
+        dst1->args[a]     = src1->args[b]; 
     }
     for(i=0; i<(end2-start2); i++) { 
-        dst1->commands[i+start1] = src2->commands[i+start2]; 
-        dst1->args[i+start1]     = src2->args[i+start2]; 
+        a = i + start1;
+        b = i + start2;
+        if(a >= dst1->length) { die("Crossover E3"); }
+        if(b >= src2->length) { die("Crossover E4"); }
+        dst1->commands[a] = src2->commands[b]; 
+        dst1->args[a]     = src2->args[b]; 
     }
-    for(i=0; i<(src1->length-end1); i++) { 
-        dst1->commands[i+start1+end2-start2] = src1->commands[i+end1];
-        dst1->args[i+start1+end2-start2] = src1->args[i+end1];
+    for(i=0; i<(src1->length-end1); i++) {
+        a = i+start1+end2-start2;
+        b = i+end1;
+        if(a >= dst1->length) { die("Crossover E5"); }
+        if(a < 0) { die("Crossover E6"); }
+        if(b >= src1->length) { die("Crossover E7"); }
+        dst1->commands[a] = src1->commands[b];
+        dst1->args[a]     = src1->args[b];
     }
     
     dst2->learning_rate = src2->learning_rate * (1. - snip) + src1->learning_rate * snip;
     dst2->thinking_time = src2->thinking_time * (1. - snip) + src1->thinking_time * snip;
     dst2->length = start2 + (end1 - start1) + (src2->length - end2);
     for(i=0; i<start2; i++) { 
-        dst2->commands[i] = src2->commands[i]; 
-        dst2->args[i]     = src2->args[i]; 
+        a = i;
+        b = i;
+        if(a >= dst2->length) { die("Crossover E8"); }
+        if(b >= src2->length) { die("Crossover E9"); }
+        dst2->commands[a] = src2->commands[b]; 
+        dst2->args[a]     = src2->args[b]; 
     }
     for(i=0; i<(end1-start1); i++) { 
-        dst2->commands[i+start2] = src1->commands[i+start1];
-        dst2->args[i+start2]     = src1->args[i+start1];
+        a = i + start2;
+        b = i + start1;
+        if(a >= dst2->length) { die("Crossover E10"); }
+        if(b >= src1->length) { die("Crossover E11"); }
+        dst2->commands[a] = src1->commands[b]; 
+        dst2->args[a]     = src1->args[b]; 
     }
     for(i=0; i<(src2->length-end2); i++) { 
-        dst2->commands[i+start2+end1-start1] = src2->commands[i+end2];
-        dst2->args[i+start2+end1-start1] = src2->args[i+end2];
+        a = i+start2+end1-start1;
+        b = i+end2;
+        if(a >= dst2->length) { die("Crossover E12"); }
+        if(a < 0) { die("Crossover E13"); }
+        if(b >= src2->length) { die("Crossover E14"); }
+        dst2->commands[a] = src2->commands[b];
+        dst2->args[a]     = src2->args[b];
     }
 }
 
