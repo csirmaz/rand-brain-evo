@@ -22,6 +22,7 @@
 
 #define INITIAL_LEARNING_RATE .1
 #define INITIAL_THINKING_TIME 60
+#define MIN_THINKING_TIME 6
 #define MUTATE_THINKING_TIME 1
 
 // How many questions to ask in a task (training/evaluation set)
@@ -40,7 +41,7 @@
 #define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) / 2.)
 
 // Penalise slow answers
-#define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 10.)
+#define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 20.)
 
 // Configuration ends
 
@@ -95,6 +96,14 @@ TYPE_VALUE getrand() {
 
 int getrand_location(const int length) {
     return (int)(getrand() * (length + 1));
+}
+
+
+void write_debug_file(char *msg) {
+    FILE *outfile = fopen("debug.dat", "w+");
+    if(outfile == NULL) { die("Cannot open file"); }
+    fprintf(outfile, "%s", msg);
+    fclose(outfile);
 }
 
 
@@ -456,10 +465,10 @@ void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
     brain->thinking_time = genes->thinking_time;
     for(i=0; i<genes->length; i++) {
         if(genes->args[i] == ARG_RAND_WEIGHT) {
-            genes->args[i] = (int)(getrand() * brain->weight_stack);
+            genes->args[i] = (int)(getrand() * (brain->weight_stack - 1));
         }
         else if(genes->args[i] == ARG_RAND_SUMSI) {
-            genes->args[i] = (int)(getrand() * brain->sumsi_stack);
+            genes->args[i] = (int)(getrand() * (brain->sumsi_stack - 1));
         }
         brain_constr_process_command(brain, genes->commands[i], genes->args[i]);
     }
@@ -515,7 +524,7 @@ void genes_mutate(struct genes_t *genes) {
         2, // 10: new sumsi & connect to last weight
         2 // 11: new weight & connect to last sumsi
 #if MUTATE_THINKING_TIME
-        ,1  // 12: mutate steps
+        ,1  // 12: mutate thinking time
 #endif
     };
     static int modes_init = 0;
@@ -569,7 +578,9 @@ void genes_mutate(struct genes_t *genes) {
             break;
 #if MUTATE_THINKING_TIME
         case 12:
-            genes->thinking_time *= getrand() * .4 + .8; break;
+            genes->thinking_time *= getrand() * .4 + .8; 
+            if(genes->thinking_time < MIN_THINKING_TIME) { genes->thinking_time = MIN_THINKING_TIME; }
+            break;
 #endif
         default:
             die("Unknown mutation mode");
@@ -601,6 +612,7 @@ void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, str
     dst1->learning_rate = src1->learning_rate * (1. - snip) + src2->learning_rate * snip;
     dst1->thinking_time = src1->thinking_time * (1. - snip) + src2->thinking_time * snip;
     dst1->length = start1 + (end2 - start2) + (src1->length - end1);
+    if(dst1->length >= MAX_GENES) { die("Crossover too long 1"); }
     for(i=0; i<start1; i++) {
         a = i;
         b = i;
@@ -630,6 +642,7 @@ void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, str
     dst2->learning_rate = src2->learning_rate * (1. - snip) + src1->learning_rate * snip;
     dst2->thinking_time = src2->thinking_time * (1. - snip) + src1->thinking_time * snip;
     dst2->length = start2 + (end1 - start1) + (src2->length - end2);
+    if(dst2->length >= MAX_GENES) { die("Crossover too long 2"); }
     for(i=0; i<start2; i++) { 
         a = i;
         b = i;
@@ -876,7 +889,7 @@ int evaluate(struct brain_t *brainpool, const struct task_t *task, TYPE_VALUE *r
         } // end loop through brains
     } // end loop through questions
     
-    printf("Task: Prev best brain: %d Target=1ratio: %f Answer=1ratio: %f CorrectRatio: %f\n", best_brain, ((TYPE_VALUE)target_1_num) / STEPS, ((TYPE_VALUE)best_brain_1_num) / STEPS, ((TYPE_VALUE)best_brain_correct_num) / STEPS);
+    fprintf(stderr, "Task: Prev best brain: %d Target=1ratio: %f Answer=1ratio: %f CorrectRatio: %f\n", best_brain, ((TYPE_VALUE)target_1_num) / STEPS, ((TYPE_VALUE)best_brain_1_num) / STEPS, ((TYPE_VALUE)best_brain_correct_num) / STEPS);
 }
 
 
@@ -887,7 +900,7 @@ static int cmpint(const void *p1, const void *p2) { return ( *((TYPE_VALUE*)p1) 
 
 
 void dump_genepool(struct genes_t *genepool) {
-    printf("Writing gene pool to file...\n");
+    fprintf(stderr, "Writing gene pool to file...\n");
     FILE *outfile = fopen("genepool.dat", "w+");
     if(outfile == NULL) { die("Cannot open file"); }
     fprintf(outfile, "genepool_v1\n# Pool size:\n%d\n", POOL_SIZE);
@@ -898,7 +911,7 @@ void dump_genepool(struct genes_t *genepool) {
 
 
 void load_genepool(struct genes_t *genepool) {
-    printf("Loading gene pool from file...\n");
+    fprintf(stderr, "Loading gene pool from file...\n");
     FILE *outfile = fopen("genepool.dat", "r");
     if(outfile == NULL) { die("Cannot open file"); }
     size_t memlen = 0;
@@ -924,8 +937,9 @@ void load_genepool(struct genes_t *genepool) {
         lineno++;
     }
     for(int i=0; i<POOL_SIZE; i++) { genes_read(&genepool[i], outfile); }
+    free(membuf);
     fclose(outfile);
-    printf("Loading gene pool from file done.\n");
+    fprintf(stderr, "Loading gene pool from file done.\n");
 }
 
 
@@ -949,7 +963,7 @@ int main(int argc, char **argv) {
         load_genepool(genepool);
     }
     else {
-        printf("Initializing new gene pool...\n");
+        fprintf(stderr, "Initializing new gene pool...\n");
         for(i=0; i<POOL_SIZE; i++) {
             genes_init(&genepool[i]);
             genes_mutate(&genepool[i]);
@@ -973,7 +987,7 @@ int main(int argc, char **argv) {
             // We add a bit of randomness because there are too many results that are the same
             results[i] = 0 - GENE_LENGTH_PENALTY * (genepool[i].length + getrand() / 2.) - THINKING_TIME_PENALTY * genepool[i].thinking_time;
         }
-        if(best_brain != -1) { printf("Best brain: %d Length: %d Thinking time: %f Initial score: %f Length penalty: %f Time penalty: %f\n", best_brain, genepool[best_brain].length, genepool[best_brain].thinking_time, results[best_brain], GENE_LENGTH_PENALTY, THINKING_TIME_PENALTY); }
+        if(best_brain != -1) { fprintf(stderr, "Best brain: %d Length: %d Thinking time: %f Initial score: %f Length penalty: %f Time penalty: %f\n", best_brain, genepool[best_brain].length, genepool[best_brain].thinking_time, results[best_brain], GENE_LENGTH_PENALTY, THINKING_TIME_PENALTY); }
         
         for(j=0; j<TASK_NUM; j++) {
             // Create a new task
@@ -995,7 +1009,7 @@ int main(int argc, char **argv) {
         TYPE_VALUE best_value = results2[POOL_SIZE - 1];
         TYPE_VALUE top_limit_value = results2[POOL_KEEP + 2]; // selects the top POOL_SIZE - POOL_KEEP - 2 many (keep 2 for the crossover)
         TYPE_VALUE limit_value = results2[POOL_SIZE - POOL_KEEP];
-        printf(
+        fprintf(stderr,
             "Best: %f=%f%% at %d Top limit: %f = %f%% at %d Keep limit: %f=%f%% at %d\n",
             best_value,
             best_value / STEPS / TASK_NUM * 100.,
@@ -1007,6 +1021,7 @@ int main(int argc, char **argv) {
             limit_value / STEPS / TASK_NUM * 100.,
             POOL_SIZE - POOL_KEEP
         );
+        write_debug_file("00best");
         
         // Now clone and mutate the top performers (POOL_SIZE - POOL_KEEP many)
         // There may be some edge cases, but whatever.
@@ -1018,7 +1033,9 @@ int main(int argc, char **argv) {
         for(i=0; i<POOL_SIZE; i++) {
             if(results[i] == best_value) { best_brain = i; break; }
         }
+        write_debug_file("10preloop");
         while(1) {
+            write_debug_file("19loop");
             while(results[target_ix] >= limit_value && target_ix < POOL_SIZE) { target_ix++; }
             while(results[source_ix] < top_limit_value && source_ix < POOL_SIZE) { source_ix++; }
             if(source_ix >= POOL_SIZE || target_ix >= POOL_SIZE) { break; }
@@ -1029,19 +1046,26 @@ int main(int argc, char **argv) {
                 target_ix++;
                 continue;
             }
+            write_debug_file("20clone");
             
             // printf("Copying %d (res %f) to %d (res %f)\n", source_ix, results[source_ix], target_ix, results[target_ix]);
             genes_clone(&genepool[source_ix], &genepool[target_ix]);
+            write_debug_file("22mutate1");
             genes_mutate(&genepool[target_ix]);
+            write_debug_file("24mutate2");
             // Randomly, mutate twice
             if(getrand() < .5) { genes_mutate(&genepool[target_ix]); }
+            write_debug_file("26brain");
             // Regenerate brain
             genes_create_brain(&genepool[target_ix], &brainpool[target_ix]);
+            write_debug_file("28finish");
             source_ix++;
             target_ix++;
             cloned++;
+            write_debug_file("29endloop");
         }
-        printf("Cloned: %d\n", cloned);
+        write_debug_file("40cloned");
+        fprintf(stderr, "Cloned: %d\n", cloned);
         
         // Crossover
         // Now we have reasonably good brains
@@ -1050,11 +1074,14 @@ int main(int argc, char **argv) {
             crossover_source = getrand() * POOL_SIZE;
             if(crossover_source != best_brain && crossover_source != crossover_target[0] && crossover_source != crossover_target[1]) { break; }
         }
-        printf("Crossover %d, %d -> %d, %d\n", best_brain, crossover_source, crossover_target[0], crossover_target[1]);
+        fprintf(stderr, "Crossover %d, %d -> %d, %d\n", best_brain, crossover_source, crossover_target[0], crossover_target[1]);
+        write_debug_file("50costart");
         genes_crossover(&genepool[best_brain], &genepool[crossover_source], &genepool[crossover_target[0]], &genepool[crossover_target[1]]);
+        write_debug_file("60coend");
         
         if((evo_steps % 20) == 0) { dump_genepool(genepool); }
         evo_steps++;
+        write_debug_file("999endloop");
     }
         
     return 0;
