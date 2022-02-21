@@ -538,7 +538,7 @@ void genes_mutate(struct genes_t *genes) {
     // printf("Mutate mode_v: %f mode: %d\n", mode_v, mode);
     switch(mode) {
         case 0: // mutate learning rate
-            genes->learning_rate *= getrand() * .2 + .9; break;
+            genes->learning_rate *= getrand() * .4 + .8; break;
         case 1:
             genes_inject(genes, getrand_location(genes->length), CMD_SUMSI_TO_OUT, ARG_DUMMY); break;
         case 2:
@@ -576,6 +576,58 @@ void genes_mutate(struct genes_t *genes) {
     }
 }
 
+
+void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, struct genes_t *dst1, struct genes_t *dst2) {
+    TYPE_VALUE start, end, snip;
+    int start1, start2, end1, end2, i;
+    
+    snip = getrand() * .8; // length of snippet (0..1)
+    start = getrand() * (1. - snip); // starting point (0..1)
+    end = start + snip;
+
+    start1 = src1->length * start;    
+    start2 = src2->length * start;    
+    end1 = src1->length * end;
+    end2 = src2->length * end;
+    
+    // src1:  0 a1a1a1 start1 b1b1b1 end1 c1c1c1
+    // src2:  0 a2a2a2 start2 b2b2b2 end2 c2c2c2
+    
+    // dst1:  0 a1a1a1 start1 b2b2b2 (start1+end2-start2) c1c1c1
+    // dst2:  0 a2a2a2 start2 b1b1b1 (start2+end1-start1) c2c2c2
+    
+    dst1->learning_rate = src1->learning_rate * (1. - snip) + src2->learning_rate * snip;
+    dst1->thinking_time = src1->thinking_time * (1. - snip) + src2->thinking_time * snip;
+    dst1->length = start1 + (end2 - start2) + (src1->length - end1);
+    for(i=0; i<start1; i++) { 
+        dst1->commands[i] = src1->commands[i]; 
+        dst1->args[i]     = src1->args[i]; 
+    }
+    for(i=0; i<(end2-start2); i++) { 
+        dst1->commands[i+start1] = src2->commands[i+start2]; 
+        dst1->args[i+start1]     = src2->args[i+start2]; 
+    }
+    for(i=0; i<(src1->length-end1); i++) { 
+        dst1->commands[i+start1+end2-start2] = src1->commands[i+end1];
+        dst1->args[i+start1+end2-start2] = src1->args[i+end1];
+    }
+    
+    dst2->learning_rate = src2->learning_rate * (1. - snip) + src1->learning_rate * snip;
+    dst2->thinking_time = src2->thinking_time * (1. - snip) + src1->thinking_time * snip;
+    dst2->length = start2 + (end1 - start1) + (src2->length - end2);
+    for(i=0; i<start2; i++) { 
+        dst2->commands[i] = src2->commands[i]; 
+        dst2->args[i]     = src2->args[i]; 
+    }
+    for(i=0; i<(end1-start1); i++) { 
+        dst2->commands[i+start2] = src1->commands[i+start1];
+        dst2->args[i+start2]     = src1->args[i+start1];
+    }
+    for(i=0; i<(src2->length-end2); i++) { 
+        dst2->commands[i+start2+end1-start1] = src2->commands[i+end2];
+        dst2->args[i+start2+end1-start1] = src2->args[i+end2];
+    }
+}
 
 // ==== TASK ===================================================================================================================
 // Create a wavy surface
@@ -906,23 +958,23 @@ int main(int argc, char **argv) {
         // worst                                               best
         // |------------------------------------------------------|
         // 0                                              POOL_SIZE
-        //                    |------- POOL_KEEP -----------------| keep me
         //                              |--- SIZE - KEEP ---------| top ones
+        //                    |------- POOL_KEEP -----------------| keep me
         for(i=0; i<POOL_SIZE; i++) {
             results2[i] = results[i];
         }
         qsort(results2, POOL_SIZE, sizeof(TYPE_VALUE), cmpint);
         TYPE_VALUE best_value = results2[POOL_SIZE - 1];
-        TYPE_VALUE top_limit_value = results2[POOL_KEEP]; // selects the top POOL_SIZE - POOL_KEEP many
+        TYPE_VALUE top_limit_value = results2[POOL_KEEP + 2]; // selects the top POOL_SIZE - POOL_KEEP - 2 many (keep 2 for the crossover)
         TYPE_VALUE limit_value = results2[POOL_SIZE - POOL_KEEP];
         printf(
             "Best: %f=%f%% at %d Top limit: %f = %f%% at %d Keep limit: %f=%f%% at %d\n",
             best_value,
             best_value / STEPS / TASK_NUM * 100.,
-            POOL_SIZE-1,
+            POOL_SIZE - 1,
             top_limit_value,
             top_limit_value / STEPS / TASK_NUM * 100.,
-            POOL_KEEP,            
+            POOL_KEEP + 2,
             limit_value,
             limit_value / STEPS / TASK_NUM * 100.,
             POOL_SIZE - POOL_KEEP
@@ -934,11 +986,22 @@ int main(int argc, char **argv) {
         int target_ix = 0;
         int cloned = 0;
         best_brain = -1;
+        int crossover_target[2];
+        for(i=0; i<POOL_SIZE; i++) {
+            if(results[i] == best_value) { best_brain = i; break; }
+        }
         while(1) {
-            while(results[source_ix] < top_limit_value && source_ix < POOL_SIZE) { source_ix++; }
             while(results[target_ix] >= limit_value && target_ix < POOL_SIZE) { target_ix++; }
+            while(results[source_ix] < top_limit_value && source_ix < POOL_SIZE) { source_ix++; }
             if(source_ix >= POOL_SIZE || target_ix >= POOL_SIZE) { break; }
-            if(results[source_ix] == best_value) { best_brain = source_ix; }
+            
+            if(cloned < 2) {
+                crossover_target[cloned] = target_ix;
+                cloned++;
+                target_ix++;
+                continue;
+            }
+            
             // printf("Copying %d (res %f) to %d (res %f)\n", source_ix, results[source_ix], target_ix, results[target_ix]);
             genes_clone(&genepool[source_ix], &genepool[target_ix]);
             genes_mutate(&genepool[target_ix]);
@@ -951,7 +1014,16 @@ int main(int argc, char **argv) {
             cloned++;
         }
         printf("Cloned: %d\n", cloned);
-        if(best_brain == -1) { die("Did not clone the best brain"); }
+        
+        // Crossover
+        // Now we have reasonably good brains
+        int crossover_source;
+        while(1) {
+            crossover_source = getrand() * POOL_SIZE;
+            if(crossover_source != best_brain && crossover_source != crossover_target[0] && crossover_source != crossover_target[1]) { break; }
+        }
+        printf("Crossover %d, %d -> %d, %d\n", best_brain, crossover_source, crossover_target[0], crossover_target[1]);
+        genes_crossover(&genepool[best_brain], &genepool[crossover_source], &genepool[crossover_target[0]], &genepool[crossover_target[1]]);
         
         if((evo_steps % 20) == 0) { dump_genepool(genepool); }
         evo_steps++;
