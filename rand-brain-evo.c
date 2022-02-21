@@ -1,7 +1,48 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 #include <pthread.h>
+
+// Configuration
+
+// red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
+#define NUM_INPUTS 9
+#define MAX_WEIGHTS 10000
+#define MAX_SUMSIS 100
+#define MAX_GENES 10000
+
+#define TYPE_VALUE float
+#define TYPE_VALUE_FORMAT "%f"
+// define TYPE_VALUE double
+// define TYPE_VALUE_FORMAT "%lf"
+
+// Grid to evaluate task surfaces
+#define TASK_EVAL_ZOOM 20.
+
+#define INITIAL_LEARNING_RATE .1
+#define INITIAL_THINKING_TIME 60
+#define MUTATE_THINKING_TIME 1
+
+// How many questions to ask in a task (training/evaluation set)
+#define STEPS 600
+
+// How many genes-brains to maintain
+#define POOL_SIZE 1024
+
+// How many to keep for the next generation (at least half)
+#define POOL_KEEP 680
+
+// How many different tasks to give
+#define TASK_NUM 3
+
+// Penalise long sequences
+#define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) / 2.)
+
+// Penalise slow answers
+#define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 10.)
+
+// Configuration ends
 
 // Commands are used to construct a network and form the gene sequences / threads
 #define CMD_NEW_WEIGHT 901
@@ -20,11 +61,7 @@
 #define ARG_RAND_WEIGHT -2
 #define ARG_RAND_SUMSI -3
 
-#define NUM_INPUTS 9 // red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
-#define MAX_WEIGHTS 10000
-#define MAX_SUMSIS 100
-#define MAX_GENES 10000
-
+// Indices when storing weight unit connections
 #define W_PIN__NUM 6
 #define W_PIN_OUT 0
 #define W_PIN_OUT_TYPE 1
@@ -38,8 +75,6 @@
 #define TYPE_SUMSI_IN 803
 #define TYPE_SUMSI_OUT 804
 #define TYPE_GLOBAL_IN 805
-
-#define TYPE_VALUE float
 
 // TODO Use double?
 // TODO Allocate memory for brains instead of static lists
@@ -61,6 +96,7 @@ TYPE_VALUE getrand() {
 int getrand_location(const int length) {
     return (int)(getrand() * (length + 1));
 }
+
 
 // ==== BRAIN ====================================================================================================================
 
@@ -91,14 +127,13 @@ struct brain_t {
     int output_conn;
     
     TYPE_VALUE learning_rate;
-    int steps_to_output;
+    int thinking_time;
     TYPE_VALUE initial_weights[MAX_WEIGHTS];
     TYPE_VALUE weights[MAX_WEIGHTS];
     
     // For internal calculations
     TYPE_VALUE weight_state[MAX_WEIGHTS];
     TYPE_VALUE sumsi_state[MAX_SUMSIS];
-    TYPE_VALUE input_state[NUM_INPUTS];
 };
 
 
@@ -126,8 +161,8 @@ void brain_constr_init(struct brain_t *brain) {
     for(i=0; i<NUM_INPUTS; i++) { brain->input_conn[i] = 0; } // unconnected
     brain->output_conn = 0;
     for(i=0; i<MAX_WEIGHTS; i++) for(j=0; j<W_PIN__NUM; j++) brain->weight_conn[i][j] = 0;
-    brain->learning_rate = 1e-5;
-    brain->steps_to_output = 60;
+    brain->learning_rate = 1e-5; // this is not relevant as overridden by (default) values in genes
+    brain->thinking_time = 60; // this is not relevant as overridden by (default) values in genes
 }
 
 
@@ -224,7 +259,7 @@ void brain_play_init(struct brain_t *brain) {
 
 
 // Perform one step of thinking and learning
-void brain_play_step(struct brain_t *brain) {
+void brain_play_step(struct brain_t *brain, TYPE_VALUE *input_state) {
     int i, p;
     TYPE_VALUE ctrl;
 
@@ -234,7 +269,7 @@ void brain_play_step(struct brain_t *brain) {
         if(p > 0) {
             switch(brain->weight_conn[i][W_PIN_IN_TYPE]) {
                 case TYPE_GLOBAL_IN:
-                    brain->weight_state[i] = brain->input_state[p];
+                    brain->weight_state[i] = input_state[p];
                     break;
                 case TYPE_SUMSI_OUT:
                     brain->weight_state[i] = brain->sumsi_state[p];
@@ -309,7 +344,7 @@ TYPE_VALUE brain_get_output(const struct brain_t *brain) {
 
 struct genes_t {
     TYPE_VALUE learning_rate;
-    TYPE_VALUE steps_to_output;
+    TYPE_VALUE thinking_time;
     int commands[MAX_GENES];
     int args[MAX_GENES];
     int length;
@@ -325,8 +360,8 @@ struct genes_t *genes_alloc(int count) {
 
 // Initialise the genes
 void genes_init(struct genes_t *genes) {
-    genes->learning_rate = 1e-2;
-    genes->steps_to_output = 10;
+    genes->learning_rate = INITIAL_LEARNING_RATE;
+    genes->thinking_time = INITIAL_THINKING_TIME;
     
     genes->commands[0] = CMD_WEIGHT_TO_INPUT;
     genes->args[0] = 8;
@@ -344,7 +379,7 @@ void genes_init(struct genes_t *genes) {
 // Copy genes
 void genes_clone(const struct genes_t *source, struct genes_t *clone) {
     clone->learning_rate = source->learning_rate;
-    clone->steps_to_output = source->steps_to_output;
+    clone->thinking_time = source->thinking_time;
     for(int i=0; i<source->length; i++) {
         clone->commands[i] = source->commands[i];
         clone->args[i] = source->args[i];
@@ -352,25 +387,63 @@ void genes_clone(const struct genes_t *source, struct genes_t *clone) {
 }
 
 
-// Print the genes
-void genes_print(const struct genes_t *genes) {
-    printf("Learning rate: %f\n", genes->learning_rate);
-    printf("Steps: %f\n", genes->steps_to_output);
-    printf("Length: %d\n", genes->length);
+// Write genes into file
+void genes_write(const struct genes_t *genes, FILE *fp, int human_readable) {
+    if(!human_readable) { fprintf(fp, "brain_v1\n"); }
+    fprintf(
+        fp, 
+        (human_readable ? "# learning_rate=%f steps=%f length=%d " : "%f\n%f\n%d\n"),
+        genes->learning_rate, 
+        genes->thinking_time, 
+        genes->length
+    );
     for(int i=0; i<genes->length; i++) {
-        printf("[%d,%d] ", genes->commands[i], genes->args[i]);
+        fprintf(
+            fp, 
+            (human_readable ? "[%d,%d] " : "%d\n%d\n"), 
+            genes->commands[i], 
+            genes->args[i]
+        );
     }
-    printf("\n");
+    if(human_readable) { fprintf(fp, "\n"); }
 }
 
 
-// Write genes into file
-void genes_write(const struct genes_t *genes, FILE *fp) {
-    fprintf(fp, "learning_rate=%f steps=%f length=%d ", genes->learning_rate, genes->steps_to_output, genes->length);
-    for(int i=0; i<genes->length; i++) {
-        fprintf(fp, "[%d,%d] ", genes->commands[i], genes->args[i]);
+// Load genes from file
+void genes_read(struct genes_t *genes, FILE *fp) {
+    size_t memlen = 0;
+    char *membuf = NULL;
+    int ret;
+    int lineno = 0;
+    int commandno;
+    
+    while(1) {
+        ret = getline(&membuf, &memlen, fp);
+        if(ret < 0) {
+            free(membuf);
+            die("Error while reading file");
+        }
+        if(membuf[0] == '#') { continue; }
+        if(ret > 100) { die("Line too long"); }
+        if(lineno == 0 && strcmp(membuf, "brain_v1\n") != 0) { printf("[%s]\n", membuf); die("Brain gene signature error"); }
+        if(lineno == 1 && sscanf(membuf, TYPE_VALUE_FORMAT, &genes->learning_rate) != 1) { die("Brain gene error 2"); }
+        if(lineno == 2 && sscanf(membuf, TYPE_VALUE_FORMAT, &genes->thinking_time) != 1) { die("Brain gene error 3"); }
+        if(lineno == 3 && sscanf(membuf, "%d", &genes->length) != 1) { die("Brain gene error 4"); }
+        if(lineno > 3) {
+            commandno = (lineno - 4) / 2;
+            if((lineno % 2) == 0) {
+                if(sscanf(membuf, "%d", &genes->commands[commandno]) != 1) { die("Brain gene error 5"); }
+                // printf("Loaded command L%d %d: %d\n", lineno, commandno, genes->commands[commandno]);
+            }
+            else {
+                if(sscanf(membuf, "%d", &genes->args[commandno]) != 1) { die("Brain gene error 6"); }
+                // printf("Loaded command arg L%d %d: %d\n", lineno, commandno, genes->args[commandno]);
+                if(commandno == genes->length - 1) { break; }
+            }
+        }
+        lineno++;
     }
-    fprintf(fp, "\n");
+    free(membuf);
 }
 
 
@@ -380,7 +453,7 @@ void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
     int i;
     brain_constr_init(brain);
     brain->learning_rate = genes->learning_rate;
-    brain->steps_to_output = genes->steps_to_output;
+    brain->thinking_time = genes->thinking_time;
     for(i=0; i<genes->length; i++) {
         if(genes->args[i] == ARG_RAND_WEIGHT) {
             genes->args[i] = (int)(getrand() * brain->weight_stack);
@@ -422,8 +495,13 @@ void genes_remove(struct genes_t *genes, const int location) {
 
 // Mutate a gene sequence
 void genes_mutate(struct genes_t *genes) {
+#if MUTATE_THINKING_TIME
     static int modes_length = 13;
     static TYPE_VALUE modes[13] = {
+#else
+    static int modes_length = 12;
+    static TYPE_VALUE modes[12] = {
+#endif
         1, // 0: mutate learning rate
         1, // 1: inject CMD_SUMSI_TO_OUT
         2, // 2: inject CMD_POP_WEIGHT
@@ -435,8 +513,10 @@ void genes_mutate(struct genes_t *genes) {
         1, // 8: inject CMD_WEIGHT_TO_WEIGHT_CTRL to random weight unit
         1, // 9: inject CMD_WEIGHT_TO_SUMSI_IN to random sumsi unit
         2, // 10: new sumsi & connect to last weight
-        2, // 11: new weight & connect to last sumsi
-        1  // 12: mutate steps
+        2 // 11: new weight & connect to last sumsi
+#if MUTATE_THINKING_TIME
+        ,1  // 12: mutate steps
+#endif
     };
     static int modes_init = 0;
     
@@ -487,8 +567,10 @@ void genes_mutate(struct genes_t *genes) {
             genes_inject(genes, loc, CMD_NEW_WEIGHT, (int)(getrand() * 200. - 100.));
             genes_inject(genes, loc+1, CMD_SUMSI_TO_WEIGHT_IN, 0);
             break;
+#if MUTATE_THINKING_TIME
         case 12:
-            genes->steps_to_output *= getrand() * .6 + .7; break;
+            genes->thinking_time *= getrand() * .4 + .8; break;
+#endif
         default:
             die("Unknown mutation mode");
     }
@@ -545,7 +627,6 @@ TYPE_VALUE task_get_value(const struct task_t *task, TYPE_VALUE x, TYPE_VALUE y)
 
 
 // Ensure the positive and negative areas are roughly equal so the test set (the questions) would be evenly distributed
-#define TASK_EVAL_ZOOM 20.
 int task_evaluate(const struct task_t *task) {
     int i, j, num_pos=0, num_neg=0;
     TYPE_VALUE x, y, v;
@@ -662,151 +743,217 @@ void task_get_question(
 
 
 // ==== EVALUATE ===================================================================================================================
-// Evaluate a brain against a task. It needs to learn and respond
 
-// How many questions to ask
-#define STEPS 600
-
+// Evaluate brains against a task. They need to learn and respond
 // Return the energy of the brain (related to correct answers)
-int evaluate(struct brain_t *brain, const struct task_t *task) {
-    int target, answer, think, age=0;
-    int energy = 0;
-    TYPE_VALUE steps_to_output_v;
+int evaluate(struct brain_t *brainpool, const struct task_t *task, TYPE_VALUE *results, int best_brain) {
+    int target, answer, think, i, question_num;
+    TYPE_VALUE thinking_time_v;
+    TYPE_VALUE input_state[NUM_INPUTS];
+    int target_1_num = 0, best_brain_1_num = 0, best_brain_correct_num = 0; // stats
     
-    brain_play_init(brain);
-    brain->input_state[8] = 1.; // bias
-    while(1) {
+    input_state[8] = 1.; // bias
+    
+    for(i=0; i<POOL_SIZE; i++) {
+        brain_play_init(&brainpool[i]);
+        // results[i] = 0; -- initialised elsewhere
+    }
+    
+    for(question_num=0; question_num<STEPS; question_num++) { // Loop through questions
+        
         task_get_question(
             task, 
-            &brain->input_state[0], // pos_x
-            &brain->input_state[1], 
-            &brain->input_state[2], 
-            &brain->input_state[3], 
-            &brain->input_state[4], 
-            &brain->input_state[5], // question_y
+            &input_state[0], // pos_x
+            &input_state[1], 
+            &input_state[2], 
+            &input_state[3], 
+            &input_state[4], 
+            &input_state[5], // question_y
             &target
         );
-        brain->input_state[6] = (TYPE_VALUE)energy;
-        // Debug: task_plot(task, brain->input_state[0], brain->input_state[1], brain->input_state[2], brain->input_state[3], brain->input_state[4], brain->input_state[5]);
         
-        steps_to_output_v = brain->steps_to_output;
-        for(think = 0; think < brain->steps_to_output; think++) {
-            brain->input_state[7] = ((TYPE_VALUE)think) / steps_to_output_v; // clock
-            brain_play_step(brain);
-        }
+        if(target) { target_1_num++; } // stats
         
-        answer = (brain_get_output(brain) >= 0);
-        if(answer == target) { energy++; } else { energy--; }
-        // printf("Target: %d Answer: %d Energy: %d\n", target, answer, energy);
-        age++;
-        if(age > STEPS) { break; }
-    }
-    return energy;
+        for(i=0; i<POOL_SIZE; i++) { // Loop through brains
+            
+            input_state[6] = results[i];
+            // Debug: task_plot(task, brain->input_state[0], brain->input_state[1], brain->input_state[2], brain->input_state[3], brain->input_state[4], brain->input_state[5]);
+        
+            thinking_time_v = brainpool[i].thinking_time;
+            for(think = 0; think < thinking_time_v; think++) { // Loop thinking
+                input_state[7] = ((TYPE_VALUE)think) / thinking_time_v; // clock
+                brain_play_step(&brainpool[i], input_state);
+            }
+        
+            answer = (brain_get_output(&brainpool[i]) >= 0);
+            if(answer == target) { results[i]++; } else { results[i]--; }
+            // if(i == best_brain) { printf("Best brain: %d Question: %d Answer: %d Target: %d Result: %f\n", i, question_num, answer, target, results[i]); }
+            if(i == best_brain) { 
+                if(answer) { best_brain_1_num++; }
+                if(answer == target) { best_brain_correct_num++; }
+            }
+            
+        } // end loop through brains
+    } // end loop through questions
+    
+    printf("Task: Prev best brain: %d Target=1ratio: %f Answer=1ratio: %f CorrectRatio: %f\n", best_brain, ((TYPE_VALUE)target_1_num) / STEPS, ((TYPE_VALUE)best_brain_1_num) / STEPS, ((TYPE_VALUE)best_brain_correct_num) / STEPS);
 }
 
 
 // =======================================================================================================================
 
-// How many genes-brains to maintain
-// Since we always halve the pool, about 9 mutations are protected
-#define POOL_SIZE 1024
+// Compare numbers
+static int cmpint(const void *p1, const void *p2) { return ( *((TYPE_VALUE*)p1) > *((TYPE_VALUE*)p2) ) - ( *((TYPE_VALUE*)p1) < *((TYPE_VALUE*)p2) ); }
 
-// How many tasks to give
-#define TASK_NUM 40
-
-// Penalise long sequences
-#define GENE_LENGTH_PENALTY (STEPS * TASK_NUM / MAX_WEIGHTS / 2.)
-
-// Compare integers
-static int cmpint(const void *p1, const void *p2) { return ( *((int*)p1) > *((int*)p2) ) - ( *((int*)p1) < *((int*)p2) ); }
 
 void dump_genepool(struct genes_t *genepool) {
-    printf("Writing to file...\n");
+    printf("Writing gene pool to file...\n");
     FILE *outfile = fopen("genepool.dat", "w+");
-    for(int i=0; i<POOL_SIZE; i++) { genes_write(&genepool[i], outfile); }
+    if(outfile == NULL) { die("Cannot open file"); }
+    fprintf(outfile, "genepool_v1\n# Pool size:\n%d\n", POOL_SIZE);
+    for(int i=0; i<POOL_SIZE; i++) { genes_write(&genepool[i], outfile, 1); }
+    for(int i=0; i<POOL_SIZE; i++) { genes_write(&genepool[i], outfile, 0); }
     fclose(outfile);
 }
 
-int main(void) {
+
+void load_genepool(struct genes_t *genepool) {
+    printf("Loading gene pool from file...\n");
+    FILE *outfile = fopen("genepool.dat", "r");
+    if(outfile == NULL) { die("Cannot open file"); }
+    size_t memlen = 0;
+    char *membuf = NULL;
+    int ret;
+    int lineno = 0;
+    int pool_size;
+    
+    while(1) {
+        ret = getline(&membuf, &memlen, outfile);
+        if(ret < 0) {
+            free(membuf);
+            die("Error while reading file");
+        }
+        if(membuf[0] == '#') { continue; }
+        if(ret > 100) { die("Line too long"); }
+        if(lineno == 0 && strcmp(membuf, "genepool_v1\n") != 0) { die("Genepool signature error"); }
+        if(lineno == 1) {
+            if(sscanf(membuf, "%d", &pool_size) != 1) { die("Genepool error 2"); }
+            if(pool_size != POOL_SIZE) { die("Pool size mismatch"); }
+            break;
+        }
+        lineno++;
+    }
+    for(int i=0; i<POOL_SIZE; i++) { genes_read(&genepool[i], outfile); }
+    fclose(outfile);
+    printf("Loading gene pool from file done.\n");
+}
+
+
+// Usage: $0 [new]
+int main(int argc, char **argv) {
+    int p_load_genes = 1;
     int i, j, evo_steps=0;
     struct task_t *task;
+    
+    if(argc == 2 && strcmp(argv[1], "new") == 0) { p_load_genes = 0; }
     
     // See also https://linux.die.net/man/3/random_r
     srandom(time(NULL));
     
     struct genes_t *genepool;
     genepool = genes_alloc(POOL_SIZE);
-    for(i=0; i<POOL_SIZE; i++) {
-        genes_init(&genepool[i]);
-        genes_mutate(&genepool[i]);
-        // genes_print(&genepool[i]);
-    }
-    
     struct brain_t *brainpool;
     brainpool = brain_alloc(POOL_SIZE);
     
-    int results[POOL_SIZE];
-    int results2[POOL_SIZE];
+    if(p_load_genes) {
+        load_genepool(genepool);
+    }
+    else {
+        printf("Initializing new gene pool...\n");
+        for(i=0; i<POOL_SIZE; i++) {
+            genes_init(&genepool[i]);
+            genes_mutate(&genepool[i]);
+            // genes_print(&genepool[i]);
+        }
+    }
+        
+    for(i=0; i<POOL_SIZE; i++) {
+        genes_create_brain(&genepool[i], &brainpool[i]);
+    }
+    
+    TYPE_VALUE results[POOL_SIZE];
+    TYPE_VALUE results2[POOL_SIZE];
     task = task_alloc();
+    int best_brain = -1;
     
     while(1) {
         
-        // Create brains. This also fixes the genes
+        // Initialise results array
         for(i=0; i<POOL_SIZE; i++) {
-            genes_create_brain(&genepool[i], &brainpool[i]);
-            results[i] = 0 - GENE_LENGTH_PENALTY * genepool[i].length;
+            // We add a bit of randomness because there are too many results that are the same
+            results[i] = 0 - GENE_LENGTH_PENALTY * (genepool[i].length + getrand() / 2.) - THINKING_TIME_PENALTY * genepool[i].thinking_time;
         }
+        if(best_brain != -1) { printf("Best brain: %d Length: %d Thinking time: %f Initial score: %f Length penalty: %f Time penalty: %f\n", best_brain, genepool[best_brain].length, genepool[best_brain].thinking_time, results[best_brain], GENE_LENGTH_PENALTY, THINKING_TIME_PENALTY); }
         
         for(j=0; j<TASK_NUM; j++) {
             // Create a new task
             task_init(task);
             // Give the task to the brains
-            for(i=0; i<POOL_SIZE; i++) {
-                results[i] += evaluate(&brainpool[i], task);
-            }
+            evaluate(brainpool, task, results, best_brain);
         }
     
-        // Order the brains
+        // Order the brains - best LAST!
+        // worst                                               best
+        // |------------------------------------------------------|
+        // 0                                              POOL_SIZE
+        //                    |------- POOL_KEEP -----------------| keep me
+        //                              |--- SIZE - KEEP ---------| top ones
         for(i=0; i<POOL_SIZE; i++) {
             results2[i] = results[i];
         }
-        qsort(results2, POOL_SIZE, sizeof(int), cmpint);
-        int median = results2[POOL_SIZE / 2];
-        // for(i=0; i<POOL_SIZE; i++) printf("%d ", results[i]); printf("median: %d\n", median);
-        // for(i=0; i<POOL_SIZE; i++) printf("%d ", results2[i]); printf("median: %d\n", median);
-        printf("Best: %f Median: %f\n", ((float)results2[POOL_SIZE-1]) / STEPS / TASK_NUM * 100., ((float)median) / STEPS / TASK_NUM * 100.);
+        qsort(results2, POOL_SIZE, sizeof(TYPE_VALUE), cmpint);
+        TYPE_VALUE best_value = results2[POOL_SIZE - 1];
+        TYPE_VALUE top_limit_value = results2[POOL_KEEP]; // selects the top POOL_SIZE - POOL_KEEP many
+        TYPE_VALUE limit_value = results2[POOL_SIZE - POOL_KEEP];
+        printf(
+            "Best: %f=%f%% at %d Top limit: %f = %f%% at %d Keep limit: %f=%f%% at %d\n",
+            best_value,
+            best_value / STEPS / TASK_NUM * 100.,
+            POOL_SIZE-1,
+            top_limit_value,
+            top_limit_value / STEPS / TASK_NUM * 100.,
+            POOL_KEEP,            
+            limit_value,
+            limit_value / STEPS / TASK_NUM * 100.,
+            POOL_SIZE - POOL_KEEP
+        );
         
-        // We keep half of them
-        int selected = 0;
-        for(i=0; i<POOL_SIZE; i++) {
-            results2[i] = (results[i] > median);
-            if(results2[i]) { selected++; }
-        }
-        for(i=0; i<POOL_SIZE; i++) {
-            if(selected >= POOL_SIZE / 2) { break; }
-            if(!results2[i] && results[i] >= median) { results2[i] = 1; selected++; }
-        }
-        // for(i=0; i<POOL_SIZE; i++) { printf("%d: Result: %d Selected: %d\n", i, results[i], results2[i]); }
-        // printf("selected: %d\n", selected);
-        
-        // Now clone and mutate
+        // Now clone and mutate the top performers (POOL_SIZE - POOL_KEEP many)
+        // There may be some edge cases, but whatever.
         int source_ix = 0;
         int target_ix = 0;
-        int done = 0;
-        while(done < POOL_SIZE / 2) {
-            while(results2[source_ix] != 1) { source_ix++; }
-            while(results2[target_ix] != 0) { target_ix++; }
-            // printf("Copying %d to %d\n", source_ix, target_ix);
+        int cloned = 0;
+        best_brain = -1;
+        while(1) {
+            while(results[source_ix] < top_limit_value && source_ix < POOL_SIZE) { source_ix++; }
+            while(results[target_ix] >= limit_value && target_ix < POOL_SIZE) { target_ix++; }
+            if(source_ix >= POOL_SIZE || target_ix >= POOL_SIZE) { break; }
+            if(results[source_ix] == best_value) { best_brain = source_ix; }
+            // printf("Copying %d (res %f) to %d (res %f)\n", source_ix, results[source_ix], target_ix, results[target_ix]);
             genes_clone(&genepool[source_ix], &genepool[target_ix]);
             genes_mutate(&genepool[target_ix]);
             // Randomly, mutate twice
             if(getrand() < .5) { genes_mutate(&genepool[target_ix]); }
+            // Regenerate brain
+            genes_create_brain(&genepool[target_ix], &brainpool[target_ix]);
             source_ix++;
             target_ix++;
-            done++;
+            cloned++;
         }
+        printf("Cloned: %d\n", cloned);
+        if(best_brain == -1) { die("Did not clone the best brain"); }
         
-        if((evo_steps % 10) == 0) { dump_genepool(genepool); }
+        if((evo_steps % 20) == 0) { dump_genepool(genepool); }
         evo_steps++;
     }
         
