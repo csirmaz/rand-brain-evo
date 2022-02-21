@@ -9,7 +9,7 @@
 // red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
 #define NUM_INPUTS 9
 #define MAX_WEIGHTS 10000
-#define MAX_SUMSIS 100
+#define MAX_SUMSIS 200
 #define MAX_GENES 10000
 
 #define TYPE_VALUE float
@@ -22,7 +22,7 @@
 
 #define INITIAL_LEARNING_RATE .1
 #define INITIAL_THINKING_TIME 60
-#define MIN_THINKING_TIME 6
+#define MIN_THINKING_TIME 12
 #define MUTATE_THINKING_TIME 1
 
 // How many questions to ask in a task (training/evaluation set)
@@ -38,7 +38,7 @@
 #define TASK_NUM 3
 
 // Penalise long sequences
-#define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) / 2.)
+#define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) )
 
 // Penalise slow answers
 #define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 20.)
@@ -176,19 +176,20 @@ void brain_constr_init(struct brain_t *brain) {
 
 
 // Construction: process a command in the gene sequence
-void brain_constr_process_command(struct brain_t *brain, int command, int ix) {
+// Returns success
+int brain_constr_process_command(struct brain_t *brain, int command, int ix) {
     int p;
 
     switch(command) {
         case CMD_NEW_WEIGHT: // create new weight unit and push. ix is the initial weight (ix/100)
             brain->weight_stack++;
             brain->initial_weights[brain->weight_stack] = ((TYPE_VALUE)ix) / 100;
-            if(brain->weight_stack >= MAX_WEIGHTS) { die("Too many weights"); }
+            if(brain->weight_stack >= MAX_WEIGHTS) { fprintf(stderr, "Too many weights\n"); return 0; }
             if(brain->weight_stack > brain->weight_stack_max) { brain->weight_stack_max = brain->weight_stack; }
             break;
         case CMD_NEW_SUMSI: // create new sumsi unit and push
             brain->sumsi_stack++;
-            if(brain->sumsi_stack >= MAX_SUMSIS) { die("Too many sumsis"); }
+            if(brain->sumsi_stack >= MAX_SUMSIS) { fprintf(stderr, "Too many sumsis\n"); return 0; }
             if(brain->sumsi_stack > brain->sumsi_stack_max) { brain->sumsi_stack_max = brain->sumsi_stack; }
             break;
         case CMD_SUMSI_TO_WEIGHT_IN: // connect latest sumsi.out to weight[-ix].in
@@ -240,7 +241,8 @@ void brain_constr_process_command(struct brain_t *brain, int command, int ix) {
                 brain->input_conn[ix] = brain->weight_stack;
             }
             else {
-                die("Overindexed input");
+                fprintf(stderr, "Overindexed input\n");
+                return 0;
             }
             break;
         case CMD_SUMSI_TO_OUT: // Connect the latest sumsi.out to the main output
@@ -250,9 +252,10 @@ void brain_constr_process_command(struct brain_t *brain, int command, int ix) {
             break;
         default:
             // printf("Command: %d", command);
-            die("Unknown command");
+            fprintf(stderr, "Unknown command\n");
+            return 0;
     }
-    
+    return 1;
 }
 
 
@@ -385,6 +388,12 @@ void genes_init(struct genes_t *genes) {
 }
 
 
+// Print info
+void genes_print_info(const struct genes_t *genes) {
+    fprintf(stderr, "Genes: learning rate: %f thinking time: %f length: %d\n", genes->learning_rate, genes->thinking_time, genes->length);
+}
+
+
 // Copy genes
 void genes_clone(const struct genes_t *source, struct genes_t *clone) {
     clone->learning_rate = source->learning_rate;
@@ -470,15 +479,18 @@ void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
         else if(genes->args[i] == ARG_RAND_SUMSI) {
             genes->args[i] = (int)(getrand() * (brain->sumsi_stack - 1));
         }
-        brain_constr_process_command(brain, genes->commands[i], genes->args[i]);
+        if(!brain_constr_process_command(brain, genes->commands[i], genes->args[i])) {
+            genes_print_info(genes);
+            die("Error while creating brain");
+        }
     }
 }
 
 
 // Inject a command at location
 void genes_inject(struct genes_t *genes, const int location, const int command, const int arg) {
-    if(location > genes->length) { die("Inject over end"); }
-    if(genes->length >= MAX_GENES) { die("Genes too long"); }
+    if(location < 0 || location > genes->length) { die("genes_inject wrong location"); }
+    if(genes->length >= MAX_GENES - 1) { die("Genes too long"); }
     if(location < genes->length) {
         for(int i=genes->length; i>location; i--) {
             genes->commands[i] = genes->commands[i-1];
@@ -493,6 +505,7 @@ void genes_inject(struct genes_t *genes, const int location, const int command, 
 
 // Remove a command at location
 void genes_remove(struct genes_t *genes, const int location) {
+    if(location < 0 || location >= genes->length) { die("genes_remove wrong location"); }
     if(genes->length <= 1) { return; }
     genes->length--;
     for(int i=location; i<genes->length; i++) {
@@ -588,6 +601,7 @@ void genes_mutate(struct genes_t *genes) {
 }
 
 
+// Create crossover of two genes
 void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, struct genes_t *dst1, struct genes_t *dst2) {
     TYPE_VALUE start, end, snip;
     int start1, start2, end1, end2, i, a, b;
