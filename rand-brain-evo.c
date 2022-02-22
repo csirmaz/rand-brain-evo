@@ -9,8 +9,8 @@
 // red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
 #define NUM_INPUTS 9
 #define MAX_WEIGHTS 10000
-#define MAX_SUMSIS 200
-#define MAX_GENES 10000
+#define MAX_SUMSIS 500
+#define MAX_GENES 50000
 
 #define TYPE_VALUE float
 #define TYPE_VALUE_FORMAT "%f"
@@ -35,10 +35,10 @@
 #define POOL_KEEP 680
 
 // How many different tasks to give
-#define TASK_NUM 3
+#define TASK_NUM 4
 
 // Penalise long sequences
-#define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) )
+#define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) / 2. )
 
 // Penalise slow answers
 #define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 20.)
@@ -77,6 +77,8 @@
 #define TYPE_SUMSI_OUT 804
 #define TYPE_GLOBAL_IN 805
 
+// TODO add benchmark solution; calculate correctness separately
+// TODO add export/import from other pools
 // TODO Use double?
 // TODO Allocate memory for brains instead of static lists
 // TODO sanity check brain after creation (e.g. inputs and outputs are connected)
@@ -100,10 +102,13 @@ int getrand_location(const int length) {
 
 
 void write_debug_file(char *msg) {
+    return;
+    /*
     FILE *outfile = fopen("debug.dat", "w+");
     if(outfile == NULL) { die("Cannot open file"); }
     fprintf(outfile, "%s", msg);
     fclose(outfile);
+    */
 }
 
 
@@ -807,7 +812,7 @@ void task_test(void) {
 }
 
 
-// Get a random coordinate value
+// Get a random coordinate value in (-1..1)
 TYPE_VALUE task_get_coord(void) {
     return getrand() * 2. - 1.;
 }
@@ -990,7 +995,9 @@ int main(int argc, char **argv) {
     }
     
     TYPE_VALUE results[POOL_SIZE];
+    TYPE_VALUE penalty[POOL_SIZE];
     TYPE_VALUE results2[POOL_SIZE];
+    TYPE_VALUE v;
     task = task_alloc();
     int best_brain = -1;
     
@@ -999,9 +1006,10 @@ int main(int argc, char **argv) {
         // Initialise results array
         for(i=0; i<POOL_SIZE; i++) {
             // We add a bit of randomness because there are too many results that are the same
-            results[i] = 0 - GENE_LENGTH_PENALTY * (genepool[i].length + getrand() / 2.) - THINKING_TIME_PENALTY * genepool[i].thinking_time;
+            results[i] = 0;
+            penalty[i] = GENE_LENGTH_PENALTY * (genepool[i].length + getrand() / 2.) + THINKING_TIME_PENALTY * genepool[i].thinking_time;
         }
-        if(best_brain != -1) { fprintf(stderr, "Best brain: %d Length: %d Thinking time: %f Initial score: %f Length penalty: %f Time penalty: %f\n", best_brain, genepool[best_brain].length, genepool[best_brain].thinking_time, results[best_brain], GENE_LENGTH_PENALTY, THINKING_TIME_PENALTY); }
+        if(best_brain != -1) { fprintf(stderr, "Best brain: %d Length: %d Thinking time: %f Penalty: %f Length penalty: %f Time penalty: %f\n", best_brain, genepool[best_brain].length, genepool[best_brain].thinking_time, penalty[best_brain], GENE_LENGTH_PENALTY, THINKING_TIME_PENALTY); }
         
         for(j=0; j<TASK_NUM; j++) {
             // Create a new task
@@ -1017,6 +1025,7 @@ int main(int argc, char **argv) {
         //                              |--- SIZE - KEEP ---------| top ones
         //                    |------- POOL_KEEP -----------------| keep me
         for(i=0; i<POOL_SIZE; i++) {
+            results[i] -= penalty[i];
             results2[i] = results[i];
         }
         qsort(results2, POOL_SIZE, sizeof(TYPE_VALUE), cmpint);
@@ -1024,7 +1033,7 @@ int main(int argc, char **argv) {
         TYPE_VALUE top_limit_value = results2[POOL_KEEP + 2]; // selects the top POOL_SIZE - POOL_KEEP - 2 many (keep 2 for the crossover)
         TYPE_VALUE limit_value = results2[POOL_SIZE - POOL_KEEP];
         fprintf(stderr,
-            "Best: %f=%f%% at %d Top limit: %f = %f%% at %d Keep limit: %f=%f%% at %d\n",
+            "Best score: %f=%f%% at %d Top limit: %f = %f%% at %d Keep limit: %f=%f%% at %d\n",
             best_value,
             best_value / STEPS / TASK_NUM * 100.,
             POOL_SIZE - 1,
@@ -1035,7 +1044,7 @@ int main(int argc, char **argv) {
             limit_value / STEPS / TASK_NUM * 100.,
             POOL_SIZE - POOL_KEEP
         );
-        write_debug_file("00best");
+        // write_debug_file("00best");
         
         // Now clone and mutate the top performers (POOL_SIZE - POOL_KEEP many)
         // There may be some edge cases, but whatever.
@@ -1045,7 +1054,12 @@ int main(int argc, char **argv) {
         best_brain = -1;
         int crossover_target[2];
         for(i=0; i<POOL_SIZE; i++) {
-            if(results[i] == best_value) { best_brain = i; break; }
+            if(results[i] == best_value) { 
+                best_brain = i;
+                v = results[best_brain] + penalty[best_brain];
+                fprintf(stderr, "Best brain: %d Performance: %f=%f%% Penalty: %f\n", best_brain, v, v/STEPS/TASK_NUM*100., penalty[best_brain]);
+                break; 
+            }
         }
         write_debug_file("10preloop");
         while(1) {
