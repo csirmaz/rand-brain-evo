@@ -24,9 +24,9 @@
 #define TASK_EVAL_ZOOM 20.
 
 #define INITIAL_LEARNING_RATE .8
-#define INITIAL_THINKING_TIME 60
+#define INITIAL_THINKING_TIME 40
 #define MIN_THINKING_TIME 12
-#define MUTATE_THINKING_TIME 1
+#define MUTATE_THINKING_TIME 0
 
 // How many questions to ask in a task (training/evaluation set)
 #define STEPS 600
@@ -41,10 +41,10 @@
 #define TASK_NUM 2
 
 // Penalise long sequences
-#define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) / 2. )
+#define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) / 8. )
 
 // Penalise slow answers
-#define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 20.)
+#define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 40.)
 
 // Whether to use a baseline strategy to guess the answers to the questions posed.
 // Yields about 94% (NB learning happens at the same time as the answering)
@@ -129,14 +129,18 @@ void write_debug_file(char *msg) {
 
 struct brain_t {
     // Weight units have two inputs (input, control) and one output
-    // We have a stack of weights for construction, but really they are always numbered sequentially, so we only need a number
-    int weight_stack;
-    int weight_stack_max;
+    // We have a stack of weights for construction
+    int weight_stack[MAX_WEIGHTS]; // IDs
+    int weight_stack_ix; // location in stack
+    int weight_num; // max number of
+    int weight_current; // ID
 
     // Sumsi units (sum and sigmoid) can have many inputs and one output
-    // We have a stack of them for construction, but really they are always numbered sequentially, so we only need a number
-    int sumsi_stack;
-    int sumsi_stack_max;
+    // We have a stack of them for construction
+    int sumsi_stack[MAX_SUMSIS];
+    int sumsi_stack_ix;
+    int sumsi_num;
+    int sumsi_current; // ID
     
     // Outgoing connections from a weight unit
     // weight_conn[i][W_PIN_OUT] -- which whatever the output is going to
@@ -180,11 +184,20 @@ TYPE_VALUE nonlinearity(TYPE_VALUE x) {
 // Initialise a brain for construction
 void brain_constr_init(struct brain_t *brain) {
     int i, j;
-    brain->weight_stack = 1; // start with 1 so 0 can mean unconnected
+    
+    brain->weight_current = 1;
+    brain->weight_stack[0] = 0; // start with 1 so 0 can mean unconnected
+    brain->weight_stack[1] = 1; // start with 1 so 0 can mean unconnected
     brain->initial_weights[1] = .5;
-    brain->weight_stack_max = 1;
-    brain->sumsi_stack = 1; // start with 1 so 0 can mean unconnected
-    brain->sumsi_stack_max = 1;
+    brain->weight_stack_ix = 1;
+    brain->weight_num = 2;
+    
+    brain->sumsi_current = 1;
+    brain->sumsi_stack[0] = 0; // start with 1 so 0 can mean unconnected
+    brain->sumsi_stack[1] = 1; // start with 1 so 0 can mean unconnected
+    brain->sumsi_stack_ix = 1;
+    brain->sumsi_num = 2;
+    
     for(i=0; i<NUM_INPUTS; i++) { brain->input_conn[i] = 0; } // unconnected
     brain->output_conn = 0;
     for(i=0; i<MAX_WEIGHTS; i++) for(j=0; j<W_PIN__NUM; j++) brain->weight_conn[i][j] = 0;
@@ -200,63 +213,79 @@ int brain_constr_process_command(struct brain_t *brain, int command, int ix) {
 
     switch(command) {
         case CMD_NEW_WEIGHT: // create new weight unit and push. ix is the initial weight (ix/100)
-            brain->weight_stack++;
-            brain->initial_weights[brain->weight_stack] = ((TYPE_VALUE)ix) / 100;
-            if(brain->weight_stack >= MAX_WEIGHTS) { fprintf(stderr, "Too many weights\n"); return 0; }
-            if(brain->weight_stack > brain->weight_stack_max) { brain->weight_stack_max = brain->weight_stack; }
+            brain->weight_num++;
+            if(brain->weight_num >= MAX_WEIGHTS) { fprintf(stderr, "Too many weights\n"); return 0; }
+            brain->weight_stack_ix++;
+            if(brain->weight_stack_ix >= MAX_WEIGHTS) { fprintf(stderr, "Too many weights (stack)\n"); return 0; }
+            brain->weight_current = brain->weight_num - 1;
+            brain->weight_stack[brain->weight_stack_ix] = brain->weight_current;
+            brain->initial_weights[brain->weight_current] = ((TYPE_VALUE)ix) / 100;
             break;
         case CMD_NEW_SUMSI: // create new sumsi unit and push
-            brain->sumsi_stack++;
-            if(brain->sumsi_stack >= MAX_SUMSIS) { fprintf(stderr, "Too many sumsis\n"); return 0; }
-            if(brain->sumsi_stack > brain->sumsi_stack_max) { brain->sumsi_stack_max = brain->sumsi_stack; }
+            brain->sumsi_num++;
+            if(brain->sumsi_num >= MAX_SUMSIS) { fprintf(stderr, "Too many sumsis\n"); return 0; }
+            brain->sumsi_stack_ix++;
+            if(brain->sumsi_stack_ix >= MAX_SUMSIS) { fprintf(stderr, "Too many sumsis (stack)\n"); return 0; }
+            brain->sumsi_current = brain->sumsi_num - 1;
+            brain->sumsi_stack[brain->sumsi_stack_ix] = brain->sumsi_current;
             break;
         case CMD_SUMSI_TO_WEIGHT_IN: // connect latest sumsi.out to weight[-ix].in
             // TODO Allow override?
-            p = brain->weight_stack - ix;
+            p = brain->weight_stack_ix - ix;
+            if(p >= 1) { p = brain->weight_stack[p]; }
             if(p >= 1) {
                 brain->weight_conn[p][W_PIN_IN_TYPE] = TYPE_SUMSI_OUT;
-                brain->weight_conn[p][W_PIN_IN] = brain->sumsi_stack;
+                brain->weight_conn[p][W_PIN_IN] = brain->sumsi_current;
             }
             break;
         case CMD_SUMSI_TO_WEIGHT_CTRL: // connect latest sumsi.out to weight[-ix].ctrl 
             // TODO Allow override?
-            p = brain->weight_stack - ix;
+            p = brain->weight_stack_ix - ix;
+            if(p >= 1) { p = brain->weight_stack[p]; }
             if(p >= 1) {
                 brain->weight_conn[p][W_PIN_CTRL_TYPE] = TYPE_SUMSI_OUT;
-                brain->weight_conn[p][W_PIN_CTRL] = brain->sumsi_stack;
+                brain->weight_conn[p][W_PIN_CTRL] = brain->sumsi_current;
             }
             break;     
         case CMD_WEIGHT_TO_SUMSI_IN: // connect latest weight.out to sumsi[-ix].in
             // TODO Allow override?
-            p = brain->sumsi_stack - ix;
+            p = brain->sumsi_stack_ix - ix;
+            if(p >= 1) { p = brain->sumsi_stack[p]; }
             if(p >= 1) {
-                brain->weight_conn[brain->weight_stack][W_PIN_OUT_TYPE] = TYPE_SUMSI_IN;
-                brain->weight_conn[brain->weight_stack][W_PIN_OUT] = p;
+                brain->weight_conn[brain->weight_current][W_PIN_OUT_TYPE] = TYPE_SUMSI_IN;
+                brain->weight_conn[brain->weight_current][W_PIN_OUT] = p;
             }
             break;
         case CMD_WEIGHT_TO_WEIGHT_CTRL: // connect latest weight.out to weight[-ix].ctrl
             // TODO Allow override?
-            p = brain->weight_stack - ix;
+            p = brain->weight_stack_ix - ix;
+            if(p >= 1) { p = brain->weight_stack[p]; }
             if(p >= 1) {
-                brain->weight_conn[brain->weight_stack][W_PIN_OUT_TYPE] = TYPE_WEIGHT_CTRL;
-                brain->weight_conn[brain->weight_stack][W_PIN_OUT] = p;
+                brain->weight_conn[brain->weight_current][W_PIN_OUT_TYPE] = TYPE_WEIGHT_CTRL;
+                brain->weight_conn[brain->weight_current][W_PIN_OUT] = p;
                 brain->weight_conn[p][W_PIN_CTRL_TYPE] = TYPE_WEIGHT_OUT;
-                brain->weight_conn[p][W_PIN_CTRL] = brain->weight_stack;
+                brain->weight_conn[p][W_PIN_CTRL] = brain->weight_current;
             }
             break;        
         case CMD_POP_WEIGHT:
-            if(brain->weight_stack > 1) { brain->weight_stack--; }
+            if(brain->weight_stack_ix > 1) { 
+                brain->weight_stack_ix--; 
+                brain->weight_current = brain->weight_stack[brain->weight_stack_ix];
+            }
             break;
         case CMD_POP_SUMSI:
-            if(brain->sumsi_stack > 1) { brain->sumsi_stack--; }
+            if(brain->sumsi_stack_ix > 1) { 
+                brain->sumsi_stack_ix--; 
+                brain->sumsi_current = brain->sumsi_stack[brain->sumsi_stack_ix];
+            }
             break;
         case CMD_WEIGHT_TO_INPUT: // Connect the main input[ix] to the latest weight.in
             // TODO Allow override?
             // TODO Allow on non-main thread?
             if(ix < NUM_INPUTS) {
-                brain->weight_conn[brain->weight_stack][W_PIN_IN_TYPE] = TYPE_GLOBAL_IN;
-                brain->weight_conn[brain->weight_stack][W_PIN_IN] = ix;
-                brain->input_conn[ix] = brain->weight_stack;
+                brain->weight_conn[brain->weight_current][W_PIN_IN_TYPE] = TYPE_GLOBAL_IN;
+                brain->weight_conn[brain->weight_current][W_PIN_IN] = ix;
+                brain->input_conn[ix] = brain->weight_current;
             }
             else {
                 fprintf(stderr, "Overindexed input\n");
@@ -266,7 +295,7 @@ int brain_constr_process_command(struct brain_t *brain, int command, int ix) {
         case CMD_SUMSI_TO_OUT: // Connect the latest sumsi.out to the main output
             // TODO Allow override?
             // TODO Allow on non-main thread?
-            brain->output_conn = brain->sumsi_stack;
+            brain->output_conn = brain->sumsi_current;
             break;
         default:
             // printf("Command: %d", command);
@@ -280,11 +309,11 @@ int brain_constr_process_command(struct brain_t *brain, int command, int ix) {
 // Initialise a brain for thinking and learning
 void brain_play_init(struct brain_t *brain) {
     int i;
-    for(i=0; i<=brain->weight_stack_max; i++) { 
+    for(i=0; i<=brain->weight_num; i++) { 
         brain->weight_state[i] = 0;
         brain->weights[i] = brain->initial_weights[i] + getrand() / 100.; // a bit of noise
     }
-    for(i=0; i<=brain->sumsi_stack_max; i++) { brain->sumsi_state[i] = 0; }
+    for(i=0; i<=brain->sumsi_num; i++) { brain->sumsi_state[i] = 0; }
 }
 
 
@@ -294,7 +323,7 @@ void brain_play_step(struct brain_t *brain, TYPE_VALUE *input_state) {
     TYPE_VALUE ctrl;
 
     // Update weight states (these will represent the inputs to the weights)
-    for(i=1; i<=brain->weight_stack_max; i++) {
+    for(i=1; i<=brain->weight_num; i++) {
         p = brain->weight_conn[i][W_PIN_IN];
         if(p > 0) {
             switch(brain->weight_conn[i][W_PIN_IN_TYPE]) {
@@ -311,18 +340,18 @@ void brain_play_step(struct brain_t *brain, TYPE_VALUE *input_state) {
     }
     
     // Apply the weights
-    for(i=1; i<=brain->weight_stack_max; i++) {
+    for(i=1; i<=brain->weight_num; i++) {
         brain->weight_state[i] *= brain->weights[i];
     }
     
     
     // Clear the sumsi states
-    for(i=1; i<=brain->sumsi_stack_max; i++) {
+    for(i=1; i<=brain->sumsi_num; i++) {
         brain->sumsi_state[i] = 0;
     }
     
     // Calculate the sums in the sumsis
-    for(i=1; i<=brain->weight_stack_max; i++) {
+    for(i=1; i<=brain->weight_num; i++) {
         p = brain->weight_conn[i][W_PIN_OUT];
         if(p > 0) {
             switch(brain->weight_conn[i][W_PIN_OUT_TYPE]) {
@@ -338,12 +367,12 @@ void brain_play_step(struct brain_t *brain, TYPE_VALUE *input_state) {
     }
     
     // Apply the nonlinearity
-    for(i=1; i<=brain->sumsi_stack_max; i++) {
+    for(i=1; i<=brain->sumsi_num; i++) {
         brain->sumsi_state[i] = nonlinearity(brain->sumsi_state[i]);
     }
     
     // Learning: apply the control
-    for(i=1; i<=brain->weight_stack_max; i++) {
+    for(i=1; i<=brain->weight_num; i++) {
         p = brain->weight_conn[i][W_PIN_CTRL];
         if(p > 0) {
             switch(brain->weight_conn[i][W_PIN_CTRL_TYPE]) {
@@ -492,10 +521,10 @@ void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
     brain->thinking_time = genes->thinking_time;
     for(i=0; i<genes->length; i++) {
         if(genes->args[i] == ARG_RAND_WEIGHT) {
-            genes->args[i] = (int)(getrand() * (brain->weight_stack - 1));
+            genes->args[i] = (int)(getrand() * (brain->weight_stack_ix - 1));
         }
         else if(genes->args[i] == ARG_RAND_SUMSI) {
-            genes->args[i] = (int)(getrand() * (brain->sumsi_stack - 1));
+            genes->args[i] = (int)(getrand() * (brain->sumsi_stack_ix - 1));
         }
         if(!brain_constr_process_command(brain, genes->commands[i], genes->args[i])) {
             genes_print_info(genes);
@@ -548,10 +577,10 @@ void genes_mutate(struct genes_t *genes) {
         2, // 3: inject CMD_POP_SUMSI
         1, // 4: inject CMD_WEIGHT_TO_INPUT with random input
         7, // 5: remove command
-        1, // 6: inject CMD_SUMSI_TO_WEIGHT_IN to random weight unit
-        1, // 7: inject CMD_SUMSI_TO_WEIGHT_CTRL to random weight unit
-        1, // 8: inject CMD_WEIGHT_TO_WEIGHT_CTRL to random weight unit
-        1, // 9: inject CMD_WEIGHT_TO_SUMSI_IN to random sumsi unit
+        3, // 6: inject CMD_SUMSI_TO_WEIGHT_IN to random weight unit
+        3, // 7: inject CMD_SUMSI_TO_WEIGHT_CTRL to random weight unit
+        3, // 8: inject CMD_WEIGHT_TO_WEIGHT_CTRL to random weight unit
+        3, // 9: inject CMD_WEIGHT_TO_SUMSI_IN to random sumsi unit
         2, // 10: new sumsi & connect to last weight
         2 // 11: new weight & connect to last sumsi
 #if MUTATE_THINKING_TIME
@@ -948,7 +977,7 @@ int evaluate(struct brain_t *brainpool, struct task_t *task, TYPE_VALUE *results
             }
         
             answer = (brain_get_output(&brainpool[i]) >= 0);
-            if(answer == target) { results[i]++; } else { results[i]--; }
+            if(answer == target) { results[i]++; }
             // if(i == best_brain) { printf("Best brain: %d Question: %d Answer: %d Target: %d Result: %f\n", i, question_num, answer, target, results[i]); }
             if(i == best_brain) { 
                 if(answer) { best_brain_1_num++; }
