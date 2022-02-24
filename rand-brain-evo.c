@@ -23,7 +23,7 @@
 // Grid to evaluate task surfaces
 #define TASK_EVAL_ZOOM 20.
 
-#define INITIAL_LEARNING_RATE .1
+#define INITIAL_LEARNING_RATE .8
 #define INITIAL_THINKING_TIME 60
 #define MIN_THINKING_TIME 12
 #define MUTATE_THINKING_TIME 1
@@ -188,8 +188,8 @@ void brain_constr_init(struct brain_t *brain) {
     for(i=0; i<NUM_INPUTS; i++) { brain->input_conn[i] = 0; } // unconnected
     brain->output_conn = 0;
     for(i=0; i<MAX_WEIGHTS; i++) for(j=0; j<W_PIN__NUM; j++) brain->weight_conn[i][j] = 0;
-    brain->learning_rate = 1e-5; // this is not relevant as overridden by (default) values in genes
-    brain->thinking_time = 60; // this is not relevant as overridden by (default) values in genes
+    brain->learning_rate = INITIAL_LEARNING_RATE; // this is not relevant as overridden by (default) values in genes
+    brain->thinking_time = INITIAL_THINKING_TIME; // this is not relevant as overridden by (default) values in genes
 }
 
 
@@ -356,7 +356,7 @@ void brain_play_step(struct brain_t *brain, TYPE_VALUE *input_state) {
                 default:
                     die("Unknown weight ctrl type");
             }
-            brain->weights[i] += ctrl * brain->learning_rate;
+            brain->weights[i] = ctrl * brain->learning_rate + brain->weights[i] * (1. - brain->learning_rate);
         }
     }
     
@@ -1171,7 +1171,7 @@ int main(int argc, char **argv) {
     TYPE_VALUE results2[POOL_SIZE];
     TYPE_VALUE v;
     task = task_alloc();
-    int best_brain = -1;
+    int best_brain = -1, mutations, mutations_i;
     
     while(1) {
         
@@ -1250,12 +1250,10 @@ int main(int argc, char **argv) {
             
             // printf("Copying %d (res %f) to %d (res %f)\n", source_ix, results[source_ix], target_ix, results[target_ix]);
             genes_clone(&genepool[source_ix], &genepool[target_ix]);
-            write_debug_file("22mutate1");
-            genes_mutate(&genepool[target_ix]);
-            write_debug_file("24mutate2");
-            // Randomly, mutate twice
-            if(getrand() < .5) { genes_mutate(&genepool[target_ix]); }
-            write_debug_file("26brain");
+            mutations = getrand() * 5;
+            for(mutations_i=0; mutations_i<=mutations; mutations_i++) {
+                genes_mutate(&genepool[target_ix]);
+            }
             // Regenerate brain
             genes_create_brain(&genepool[target_ix], &brainpool[target_ix]);
             write_debug_file("28finish");
