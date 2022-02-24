@@ -2,7 +2,10 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
-#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#include <time.h>
+// include <pthread.h>
 
 // Configuration
 
@@ -35,13 +38,17 @@
 #define POOL_KEEP 680
 
 // How many different tasks to give
-#define TASK_NUM 4
+#define TASK_NUM 2
 
 // Penalise long sequences
 #define GENE_LENGTH_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)MAX_WEIGHTS) / 2. )
 
 // Penalise slow answers
 #define THINKING_TIME_PENALTY (((TYPE_VALUE)STEPS) * ((TYPE_VALUE)TASK_NUM) / ((TYPE_VALUE)INITIAL_THINKING_TIME) / 20.)
+
+// Whether to use a baseline strategy to guess the answers to the questions posed.
+// Yields about 94% (NB learning happens at the same time as the answering)
+#define CALCULATE_BASELINE 0
 
 // Configuration ends
 
@@ -77,8 +84,15 @@
 #define TYPE_SUMSI_OUT 804
 #define TYPE_GLOBAL_IN 805
 
-// TODO add benchmark solution; calculate correctness separately
+#define XPOL_NOOP 700
+#define XPOL_DOWNLOAD 701
+#define XPOL_DOWNLOAD_READY 702
+#define XPOL_UPLOAD 703
+int xpol_state = XPOL_NOOP;
+pid_t xpol_target_pid = -1;
+
 // TODO add export/import from other pools
+// TODO track the age of brains
 // TODO Use double?
 // TODO Allocate memory for brains instead of static lists
 // TODO sanity check brain after creation (e.g. inputs and outputs are connected)
@@ -110,7 +124,6 @@ void write_debug_file(char *msg) {
     fclose(outfile);
     */
 }
-
 
 // ==== BRAIN ====================================================================================================================
 
@@ -693,7 +706,7 @@ void genes_crossover(const struct genes_t *src1, const struct genes_t *src2, str
 // Create a wavy surface
 
 struct task_t {
-    TYPE_VALUE x_freq1;
+    TYPE_VALUE x_freq1; // sine function in x direction
     TYPE_VALUE x_phase1;
 
     TYPE_VALUE y_freq1;
@@ -705,8 +718,16 @@ struct task_t {
     TYPE_VALUE y_freq2;
     TYPE_VALUE y_phase2;
     
-    TYPE_VALUE pol_freq;
+    TYPE_VALUE pol_freq; // sine function in radial direction
     TYPE_VALUE pol_phase;
+
+#if CALCULATE_BASELINE
+    int step;
+    TYPE_VALUE examples_pos_x[STEPS];
+    TYPE_VALUE examples_pos_y[STEPS];
+    TYPE_VALUE examples_neg_x[STEPS];
+    TYPE_VALUE examples_neg_y[STEPS];
+#endif
 };
 
 TYPE_VALUE task_init_freq(void) {
@@ -758,6 +779,9 @@ int task_evaluate(const struct task_t *task) {
 
 // Initialise the surface
 void task_init(struct task_t *task) {
+#if CALCULATE_BASELINE
+    task->step = 0;
+#endif
     while(1) {
         task->x_freq1 = task_init_freq();
         task->y_freq1 = task_init_freq();
@@ -819,9 +843,10 @@ TYPE_VALUE task_get_coord(void) {
 
 
 // Get a training question from a task
-// This returns the coordinates of a positive point, the coordinates of a negative point, a question point and a target answer
-void task_get_question(
-    const struct task_t *task,
+// This returns (in arguments) the coordinates of a positive point, the coordinates of a negative point, a question point and a target answer
+// Can return whether a baseline strategy can guess the correct answer
+int task_get_question(
+    struct task_t *task,
     TYPE_VALUE *pos_x, 
     TYPE_VALUE *pos_y,
     TYPE_VALUE *neg_x,
@@ -851,6 +876,30 @@ void task_get_question(
     *question_x = x;
     *question_y = y;
     *target = (task_get_value(task, x, y) >= 0);
+    
+    // Use a baseline strategy to try to answer our own question
+    // The strategy is to respond with the class of the closes example seen so far
+    // TODO This does not take into account that the brains are aware of their own scores
+    // so can use the questions as well to learn the surface better. Can add this later.
+#if CALCULATE_BASELINE
+    task->examples_pos_x[task->step] = *pos_x;
+    task->examples_pos_y[task->step] = *pos_y;
+    task->examples_neg_x[task->step] = *neg_x;
+    task->examples_neg_y[task->step] = *neg_y;
+    int baseline_answer = -1;
+    TYPE_VALUE d2, min_distance2 = 10.; // coordinates between -1 and 1
+    for(int i=0; i<task->step; i++) {
+        d2 = (task->examples_pos_x[i] - x) * (task->examples_pos_x[i] - x) + (task->examples_pos_y[i] - y) * (task->examples_pos_y[i] - y);
+        if(d2 < min_distance2) { baseline_answer = 1; min_distance2 = d2; }
+        d2 = (task->examples_neg_x[i] - x) * (task->examples_neg_x[i] - x) + (task->examples_neg_y[i] - y) * (task->examples_neg_y[i] - y);
+        if(d2 < min_distance2) { baseline_answer = 0; min_distance2 = d2; }
+    }
+    task->step++;
+    if(task->step > STEPS) { die("Too many steps for a task"); }
+    return (*target == baseline_answer);
+#else
+    return -1;
+#endif
 }
 
 
@@ -858,11 +907,12 @@ void task_get_question(
 
 // Evaluate brains against a task. They need to learn and respond
 // Return the energy of the brain (related to correct answers)
-int evaluate(struct brain_t *brainpool, const struct task_t *task, TYPE_VALUE *results, int best_brain) {
+int evaluate(struct brain_t *brainpool, struct task_t *task, TYPE_VALUE *results, int best_brain) {
     int target, answer, think, i, question_num;
     TYPE_VALUE thinking_time_v;
     TYPE_VALUE input_state[NUM_INPUTS];
     int target_1_num = 0, best_brain_1_num = 0, best_brain_correct_num = 0; // stats
+    int baseline_correct = 0;
     
     input_state[8] = 1.; // bias
     
@@ -873,7 +923,7 @@ int evaluate(struct brain_t *brainpool, const struct task_t *task, TYPE_VALUE *r
     
     for(question_num=0; question_num<STEPS; question_num++) { // Loop through questions
         
-        task_get_question(
+        baseline_correct += task_get_question(
             task, 
             &input_state[0], // pos_x
             &input_state[1], 
@@ -908,11 +958,122 @@ int evaluate(struct brain_t *brainpool, const struct task_t *task, TYPE_VALUE *r
         } // end loop through brains
     } // end loop through questions
     
-    fprintf(stderr, "Task: Prev best brain: %d Target=1ratio: %f Answer=1ratio: %f CorrectRatio: %f\n", best_brain, ((TYPE_VALUE)target_1_num) / STEPS, ((TYPE_VALUE)best_brain_1_num) / STEPS, ((TYPE_VALUE)best_brain_correct_num) / STEPS);
+    fprintf(stderr, "Task: Prev best brain: %d Target=1ratio: %f Answer=1ratio: %f CorrectRatio: %f BaselineCorrectRatio: %f\n", best_brain, ((TYPE_VALUE)target_1_num) / STEPS, ((TYPE_VALUE)best_brain_1_num) / STEPS, ((TYPE_VALUE)best_brain_correct_num) / STEPS, ((TYPE_VALUE)baseline_correct) / STEPS);
+}
+
+
+// ==== XPOL ====================================================================================================================
+// Download and upload genes via client.php and a file
+/*
+
+     rand-brain-evo.c       client.php          server.php
+
+Download
+     XPOL_NOOP
+     xpol_request_download()
+     XPOL_DOWNLOAD
+               ----USR1------->
+                                   ------POST----->
+                                   <-----data------
+                            writes file
+               <---USR1--------
+     XPOL_DOWNLOAD_READY
+     xpol_tick()
+     reads file
+     XPOL_NOOP
+     
+Upload
+     XPOL_NOOP
+     xpol_upload()
+     XPOL_UPLOAD
+     writes file
+               ----USR2------->
+                            reads file
+                                   ------POST----->
+                                   <-----"ok"------
+               <---USR2--------
+     XPOL_NOOP     
+
+*/
+
+void xpol_sig_handler(int signum) {
+    if(signum == SIGUSR1) {
+        if(xpol_state == XPOL_DOWNLOAD) {
+            fprintf(stderr, "XPOL: download ready\n");
+            xpol_state = XPOL_DOWNLOAD_READY;
+        }
+        else {
+            die("Unexpected USR1 (download)");
+        }
+    }
+    else if(signum == SIGUSR2) {
+        if(xpol_state == XPOL_UPLOAD) {
+            fprintf(stderr, "XPOL: upload done\n");
+            xpol_state = XPOL_NOOP;
+        }
+        else {
+            die("Unexpected USR2 (upload)");
+        }
+    }
+    else {
+        die("Unexpected signal");
+    }
+}
+
+
+// Start uploading some genes
+void xpol_upload(const struct genes_t *genes) {
+    if(xpol_target_pid == -1) { return; }
+    if(xpol_state != XPOL_NOOP) {
+        fprintf(stderr, "XPOL: Cannot start uploading\n");
+        return;
+    }
+    xpol_state = XPOL_UPLOAD;
+    fprintf(stderr, "XPOL: upload started\n");
+    FILE *outfile = fopen("xpol.dat", "w+");
+    if(outfile == NULL) { die("Cannot open file"); }
+    genes_write(genes, outfile, 0);
+    fclose(outfile);
+    if(kill(xpol_target_pid, SIGUSR2) != 0) {
+        die("Cannot send signal");
+    }
+}
+
+
+// Request downloading genes
+void xpol_request_download() {
+    if(xpol_target_pid == -1) { return; }
+    if(xpol_state != XPOL_NOOP) {
+        fprintf(stderr, "XPOL: Cannot start downloading\n");
+        return;
+    }
+    xpol_state = XPOL_DOWNLOAD;
+    fprintf(stderr, "XPOL: download requested\n");
+    if(kill(xpol_target_pid, SIGUSR1) != 0) {
+        die("Cannot send signal");
+    }
+}
+
+
+// Perform anything necessary
+// Returns if anything happened
+int xpol_tick(struct genes_t *genes_target) {
+    if(xpol_target_pid == -1) { return 0; }
+    if(xpol_state == XPOL_DOWNLOAD_READY) {
+        fprintf(stderr, "XPOL: Download ready, injecting\n");
+        FILE *outfile = fopen("xpol.dat", "r");
+        if(outfile == NULL) { die("Cannot open file"); }
+        genes_read(genes_target, outfile);
+        fclose(outfile);        
+        xpol_state = XPOL_NOOP;
+        return 1;
+    }
+    return 0;
 }
 
 
 // =======================================================================================================================
+
 
 // Compare numbers
 static int cmpint(const void *p1, const void *p2) { return ( *((TYPE_VALUE*)p1) > *((TYPE_VALUE*)p2) ) - ( *((TYPE_VALUE*)p1) < *((TYPE_VALUE*)p2) ); }
@@ -962,13 +1123,24 @@ void load_genepool(struct genes_t *genepool) {
 }
 
 
-// Usage: $0 [new]
+// Usage: $0 PID [new]
+// Use PID=-1 to disable
 int main(int argc, char **argv) {
     int p_load_genes = 1;
     int i, j, evo_steps=0;
     struct task_t *task;
     
-    if(argc == 2 && strcmp(argv[1], "new") == 0) { p_load_genes = 0; }
+    signal(SIGUSR1, xpol_sig_handler);
+    signal(SIGUSR2, xpol_sig_handler);
+    
+    if(argc >= 2 && argc <= 3) {
+        if(sscanf(argv[1], "%d", &xpol_target_pid) != 1) { die("Wrong usage - wrong pid"); }
+        if(argc == 3 && strcmp(argv[2], "new") == 0) { p_load_genes = 0; }
+    }
+    else {
+        die("Wrong usage");
+    }
+    fprintf(stderr, "My pid: %d XPOL target pid: %d\n", getpid(), xpol_target_pid);
     
     // See also https://linux.die.net/man/3/random_r
     srandom(time(NULL));
@@ -1030,7 +1202,7 @@ int main(int argc, char **argv) {
         }
         qsort(results2, POOL_SIZE, sizeof(TYPE_VALUE), cmpint);
         TYPE_VALUE best_value = results2[POOL_SIZE - 1];
-        TYPE_VALUE top_limit_value = results2[POOL_KEEP + 2]; // selects the top POOL_SIZE - POOL_KEEP - 2 many (keep 2 for the crossover)
+        TYPE_VALUE top_limit_value = results2[POOL_KEEP + 2]; // selects the top POOL_SIZE - POOL_KEEP - 2 many (keep 2 for the crossover and XPOL)
         TYPE_VALUE limit_value = results2[POOL_SIZE - POOL_KEEP];
         fprintf(stderr,
             "Best score: %f=%f%% at %d Top limit: %f = %f%% at %d Keep limit: %f=%f%% at %d\n",
@@ -1102,12 +1274,18 @@ int main(int argc, char **argv) {
             crossover_source = getrand() * POOL_SIZE;
             if(crossover_source != best_brain && crossover_source != crossover_target[0] && crossover_source != crossover_target[1]) { break; }
         }
-        fprintf(stderr, "Crossover %d, %d -> %d, %d\n", best_brain, crossover_source, crossover_target[0], crossover_target[1]);
+        fprintf(stderr, "Crossover %d, %d -> %d, %d (xpol?)\n", best_brain, crossover_source, crossover_target[0], crossover_target[1]);
         write_debug_file("50costart");
         genes_crossover(&genepool[best_brain], &genepool[crossover_source], &genepool[crossover_target[0]], &genepool[crossover_target[1]]);
+        xpol_tick(&genepool[crossover_target[1]]);
         write_debug_file("60coend");
         
-        if((evo_steps % 20) == 0) { dump_genepool(genepool); }
+        // Save to file
+        if((evo_steps % 10) == 0) { dump_genepool(genepool); }
+        
+        if((evo_steps % 50) == 0) { xpol_upload(&genepool[best_brain]); }
+        if((evo_steps % 50) == 10) { xpol_request_download(); }
+        
         evo_steps++;
         write_debug_file("999endloop");
     }
