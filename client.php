@@ -2,7 +2,8 @@
 
 // Launches the rand-brain-evo binary and manages it, and handles web requests for xpol (cross-pool communication)
 
-require('config.php');
+$PATH = dirname(__FILE__);
+require($PATH . '/config.php');
 $running = true;
 $state = 'noop';
 
@@ -74,6 +75,7 @@ while($running) {
     if($state == 'upload') {
         lg("PHP: Uploading\n");
         $data = file_get_contents($p_file);
+        lg("PHP: Uploading ".strlen($data)." bytes\n");
         post(['todo'=>'put', 'data'=>$data]);
         posix_kill($childpid, SIGUSR2);
     }
