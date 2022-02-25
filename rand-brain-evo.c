@@ -12,7 +12,7 @@
 // red_example(x,y), blue_example(x,y), question(x,y), energy, clock, bias
 #define NUM_INPUTS 9
 #define MAX_WEIGHTS 10000
-#define MAX_SUMSIS 500
+#define MAX_SUMSIS 1000
 #define MAX_GENES 50000
 
 #define TYPE_VALUE float
@@ -536,7 +536,10 @@ void genes_create_brain(struct genes_t *genes, struct brain_t *brain) {
 
 // Inject a command at location
 void genes_inject(struct genes_t *genes, const int location, const int command, const int arg) {
-    if(location < 0 || location > genes->length) { die("genes_inject wrong location"); }
+    if(location < 0 || location > genes->length) { 
+        fprintf(stderr, "location: %d length: %d\n", location, genes->length);
+        die("genes_inject wrong location 1"); 
+    }
     if(genes->length >= MAX_GENES - 1) { die("Genes too long"); }
     if(location < genes->length) {
         for(int i=genes->length; i>location; i--) {
@@ -552,7 +555,10 @@ void genes_inject(struct genes_t *genes, const int location, const int command, 
 
 // Remove a command at location
 void genes_remove(struct genes_t *genes, const int location) {
-    if(location < 0 || location >= genes->length) { die("genes_remove wrong location"); }
+    if(location < 0 || location >= genes->length) { 
+        fprintf(stderr, "location: %d length: %d\n", location, genes->length);
+        die("genes_remove wrong location 2"); 
+    }
     if(genes->length <= 1) { return; }
     genes->length--;
     for(int i=location; i<genes->length; i++) {
